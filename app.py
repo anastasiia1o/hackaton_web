@@ -72,6 +72,14 @@ with st.sidebar:
     opacity = st.slider("Прозрачность маски", 0.0, 1.0, 0.55, 0.05)
 
     st.divider()
+    st.subheader("Слой уверенности")
+    show_confidence = st.checkbox(
+        "Показать карту уверенности", value=False,
+        help="Тепловой слой: красный — модель не уверена, зелёный — уверена.",
+    )
+    conf_opacity = st.slider("Прозрачность слоя уверенности", 0.0, 1.0, 0.5, 0.05)
+
+    st.divider()
     interactive = st.checkbox(
         "Интерактивный вьюер (zoom/pan + minimap)", value=True,
         help="Колесо — приблизить/отдалить, перетаскивание — панорама, "
@@ -153,6 +161,12 @@ with col_img:
     mask = load_mask(result.ml.mask_path)
     overlay = viewer.make_overlay(base, mask, show_classes=show_classes, opacity=opacity)
 
+    # Переключаемый слой уверенности поверх маски (работает в обоих режимах показа).
+    has_conf = bool(result.ml.confidence_map_path and Path(result.ml.confidence_map_path).exists())
+    if show_confidence and has_conf:
+        conf = viewer.load_confidence(result.ml.confidence_map_path)
+        overlay = viewer.add_confidence_layer(overlay, conf, opacity=conf_opacity)
+
     if interactive:
         st.components.v1.html(
             viewer.interactive_viewer_html(overlay, height=660), height=680
@@ -160,10 +174,17 @@ with col_img:
     else:
         st.image(overlay, use_container_width=True)
 
-    if result.ml.confidence_map_path and Path(result.ml.confidence_map_path).exists():
-        with st.expander("Карта уверенности модели (heatmap)"):
-            st.image(result.ml.confidence_map_path, use_container_width=True,
-                     caption="Ярче = увереннее")
+    if show_confidence and has_conf:
+        chips = " ".join(
+            f'<span style="display:inline-block;margin:2px 10px 2px 0;">'
+            f'<span style="display:inline-block;width:12px;height:12px;'
+            f'background:{hexcol};border-radius:2px;margin-right:5px;"></span>{name}</span>'
+            for name, hexcol in viewer.confidence_legend()
+        )
+        st.caption("Слой уверенности:")
+        st.markdown(chips, unsafe_allow_html=True)
+    elif show_confidence and not has_conf:
+        st.info("Карта уверенности недоступна для этого изображения.")
 
 with col_metrics:
     st.subheader("Количественные метрики")
