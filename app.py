@@ -21,7 +21,8 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-from src import config, ml_client, reports, storage
+from src import config, ml_client, reports, storage, gis_export
+from src.contract import ContractError
 from src.pipeline import run_analysis, load_mask
 from ui import viewer, components
 
@@ -134,7 +135,18 @@ if max(w, h) > config.MAX_DIMENSION_WARN:
 # --- Запуск анализа ---------------------------------------------------------
 with st.spinner("Анализируем изображение…"):
     params = {"scenario": scenario} if scenario else None
-    result = run_analysis(str(image_path), params=params)
+    try:
+        result = run_analysis(str(image_path), params=params)
+    except ContractError as e:
+        st.error(f"Ответ ML-сервиса не соответствует контракту: {e}")
+        st.caption(
+            "Проверьте ML-сервис (см. docs/ML_INTEGRATION_GUIDE.md) или "
+            "переключитесь в MOCK-режим."
+        )
+        st.stop()
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Не удалось выполнить анализ: {e}")
+        st.stop()
 
 # --- Итоговая классификация -------------------------------------------------
 components.classification_card(result)
@@ -201,7 +213,7 @@ st.subheader("Экспорт результатов")
 overlay_png = storage.result_dir(str(image_path)) / "overlay.png"
 overlay.convert("RGB").save(overlay_png)
 
-exp_col1, exp_col2, exp_col3, exp_col4 = st.columns(4)
+exp_col1, exp_col2, exp_col3, exp_col4, exp_col5 = st.columns(5)
 
 with exp_col1:
     st.download_button(
@@ -227,6 +239,14 @@ with exp_col3:
             mime="image/png",
         )
 with exp_col4:
+    st.download_button(
+        "Скачать GeoJSON",
+        data=gis_export.geojson_bytes(result),
+        file_name=f"{image_path.stem}_objects.geojson",
+        mime="application/geo+json",
+        help="Объекты (включения) как GeoJSON — для ГИС/QGIS.",
+    )
+with exp_col5:
     if st.button("Сформировать PDF-отчёт"):
         with st.spinner("Собираем PDF…"):
             pdf_path = reports.export_pdf(result, overlay_png=overlay_png)

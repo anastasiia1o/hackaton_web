@@ -76,14 +76,22 @@ else:
 
 # --- Читаемая таблица (доли -> проценты) ------------------------------------
 pretty = view.copy()
+# Вложенные/служебные поля (напр. thresholds — словарь порогов) не показываем
+# в основной таблице, чтобы она читалась; они остаются в выгрузке JSONL.
+for drop_col in ["thresholds", "app_version"]:
+    if drop_col in pretty:
+        pretty = pretty.drop(columns=[drop_col])
 for frac_col, pct_col in [("talc_fraction", "Тальк, %"),
                           ("fine_of_sulphides", "Тонкие/сульфиды, %")]:
     if frac_col in pretty:
         pretty[pct_col] = (pretty[frac_col] * 100).round(1)
         pretty = pretty.drop(columns=[frac_col])
+if "needs_review" in pretty:
+    pretty["needs_review"] = pretty["needs_review"].map(lambda v: "да" if v else "")
 
 rename = {"ts": "Время", "image": "Изображение", "ore_class": "Класс руды",
-          "model_version": "Модель"}
+          "model_version": "Модель", "needs_review": "Проверка",
+          "inference_time_ms": "Время инференса, мс"}
 pretty = pretty.rename(columns={k: v for k, v in rename.items() if k in pretty})
 
 st.subheader(f"Записи ({len(view)})")
