@@ -65,6 +65,47 @@ def make_overlay(
     return Image.alpha_composite(base, overlay)
 
 
+def load_confidence(conf_path: str) -> np.ndarray:
+    """Загрузить grayscale-карту уверенности как 2D-массив 0..255 (ярче = увереннее)."""
+    return np.array(Image.open(conf_path).convert("L"), dtype=np.uint8)
+
+
+def colorize_confidence(conf: np.ndarray, opacity: float = 0.5) -> Image.Image:
+    """
+    Раскрасить карту уверенности в тепловой слой RGBA.
+
+    Идея слоя — сразу видеть, ГДЕ модель не уверена: низкая уверенность светится
+    красным, средняя — жёлтым, высокая — зелёным. Прозрачность общая (opacity),
+    чтобы под слоем читалось исходное изображение.
+    """
+    c = conf.astype(np.float32) / 255.0                 # 0..1, выше = увереннее
+    r = np.clip(2.0 * (1.0 - c), 0.0, 1.0)              # мало уверенности -> красный
+    g = np.clip(2.0 * c, 0.0, 1.0)                       # много уверенности -> зелёный
+    b = np.zeros_like(c)
+    a = np.full_like(c, float(opacity))
+    rgba = (np.stack([r, g, b, a], axis=-1) * 255).astype(np.uint8)
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+def add_confidence_layer(
+    composite: Image.Image, conf: np.ndarray, opacity: float = 0.5
+) -> Image.Image:
+    """Наложить тепловой слой уверенности поверх уже собранного изображения."""
+    layer = colorize_confidence(conf, opacity=opacity)
+    if layer.size != composite.size:
+        layer = layer.resize(composite.size, Image.BILINEAR)
+    return Image.alpha_composite(composite.convert("RGBA"), layer)
+
+
+def confidence_legend() -> list[tuple[str, str]]:
+    """Легенда теплового слоя уверенности: (подпись, hex-цвет)."""
+    return [
+        ("низкая уверенность", "#ff0000"),
+        ("средняя", "#ffff00"),
+        ("высокая", "#00cc00"),
+    ]
+
+
 def legend_items() -> list[tuple[str, str]]:
     """Легенда для UI: (название класса, hex-цвет)."""
     items = []
