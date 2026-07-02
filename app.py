@@ -205,6 +205,46 @@ with col_metrics:
         for wmsg in result.ml.warnings:
             st.warning(wmsg)
 
+# --- Инспектор участка (высокое разрешение, ленивый декод по кнопке) ---------
+st.divider()
+with st.expander("🔬 Инспектор участка (высокое разрешение)"):
+    st.caption(
+        "Обзор выше уменьшен для скорости. Выделите область — и посмотрите её "
+        "в максимально возможном разрешении. Тяжёлый исходник декодируется "
+        "только по кнопке (не при каждом действии). Для гигапиксельных панорам "
+        "детализация ограничена лимитом памяти."
+    )
+    ins_ctrl, ins_view = st.columns([2, 3])
+    with ins_ctrl:
+        ins_x = st.slider("Область по X", 0.0, 1.0, (0.40, 0.55), 0.01, key="insp_x")
+        ins_y = st.slider("Область по Y", 0.0, 1.0, (0.40, 0.55), 0.01, key="insp_y")
+        do_inspect = st.button("Показать участок в высоком разрешении")
+    with ins_view:
+        ov_box = viewer.preview_region(
+            base, ins_x[0], ins_y[0], ins_x[1], ins_y[1], color=(255, 210, 60, 70)
+        )
+        st.image(ov_box, use_container_width=True, caption="Обзор: выделенная область")
+
+    if do_inspect:
+        with st.spinner("Готовим участок в высоком разрешении…"):
+            crop, meta = viewer.crop_region_highres(
+                str(image_path), ins_x[0], ins_y[0], ins_x[1], ins_y[1]
+            )
+        rx = meta["region_px_orig"]
+        st.image(
+            crop, use_container_width=True,
+            caption=(f"Участок оригинала {rx[2]}×{rx[3]} px @ ({rx[0]},{rx[1]}) → "
+                     f"показано {meta['shown_size'][0]}×{meta['shown_size'][1]}"),
+        )
+        if meta["capped"]:
+            st.info(
+                f"Исходник очень большой ({meta['orig_size'][0]}×{meta['orig_size'][1]}) — "
+                f"для инспекции понижен (масштаб {meta['native_scale']}), чтобы уложиться "
+                f"в память. Участок всё равно детальнее обзора."
+            )
+        else:
+            st.success("Участок показан в нативном разрешении.")
+
 # --- Экспорт ----------------------------------------------------------------
 st.divider()
 st.subheader("Экспорт результатов")
