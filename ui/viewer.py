@@ -65,6 +65,30 @@ def make_overlay(
     return Image.alpha_composite(base, overlay)
 
 
+def preview_region(
+    image: Image.Image,
+    x0f: float, y0f: float, x1f: float, y1f: float,
+    color: tuple[int, int, int, int] = (255, 210, 60, 90),
+) -> Image.Image:
+    """
+    Нарисовать прямоугольную область поверх изображения (для экспертной коррекции).
+
+    Координаты задаются В ДОЛЯХ размера изображения (0..1), чтобы не зависеть от
+    масштаба превью. Возвращает RGB-копию с полупрозрачной заливкой и рамкой.
+    """
+    from PIL import ImageDraw
+
+    base = image.convert("RGBA")
+    w, h = base.size
+    x0, y0 = int(min(x0f, x1f) * w), int(min(y0f, y1f) * h)
+    x1, y1 = int(max(x0f, x1f) * w), int(max(y0f, y1f) * h)
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    outline = (color[0], color[1], color[2], 255)
+    draw.rectangle([x0, y0, x1, y1], fill=color, outline=outline, width=max(2, w // 400))
+    return Image.alpha_composite(base, layer).convert("RGB")
+
+
 def load_confidence(conf_path: str) -> np.ndarray:
     """Загрузить grayscale-карту уверенности как 2D-массив 0..255 (ярче = увереннее)."""
     return np.array(Image.open(conf_path).convert("L"), dtype=np.uint8)
