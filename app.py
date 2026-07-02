@@ -29,6 +29,10 @@ from ui import viewer, components
 st.set_page_config(page_title="OreVision", page_icon="⛏️", layout="wide")
 config.ensure_dirs()
 
+# Панорамы бывают гигапиксельными (сотни Мп) — снимаем лимит PIL на размер,
+# сами уменьшаем изображение при показе (viewer.load_display_image).
+Image.MAX_IMAGE_PIXELS = None
+
 # --- Боковая панель: режим ML, статус, сценарий (для демо) ------------------
 with st.sidebar:
     st.title("⛏️ OreVision")
@@ -66,6 +70,13 @@ with st.sidebar:
     show_talc = st.checkbox("Тальк (синий)", value=True)
     show_artifact = st.checkbox("Артефакты (серый)", value=False)
     opacity = st.slider("Прозрачность маски", 0.0, 1.0, 0.55, 0.05)
+
+    st.divider()
+    interactive = st.checkbox(
+        "Интерактивный вьюер (zoom/pan + minimap)", value=True,
+        help="Колесо — приблизить/отдалить, перетаскивание — панорама, "
+             "мини-карта справа внизу — навигатор по всей панораме.",
+    )
 
 # --- Заголовок и легенда ----------------------------------------------------
 st.header("Анализ изображения шлифа")
@@ -106,8 +117,10 @@ with Image.open(image_path) as im:
     w, h = im.size
 if max(w, h) > config.MAX_DIMENSION_WARN:
     st.warning(
-        f"Большое панорамное изображение ({w}×{h}). В MVP превью масштабируется; "
-        f"tiled-просмотр для полного разрешения — в разработке (поток B)."
+        f"Большое панорамное изображение ({w}×{h}). Для показа оно уменьшается "
+        f"до {viewer.DISPLAY_MAX_DIM}px по большей стороне, но zoom/pan во вьюере "
+        f"работают на стороне браузера. Полностайловая загрузка исходного "
+        f"разрешения — в разработке (поток B)."
     )
 
 # --- Запуск анализа ---------------------------------------------------------
@@ -134,10 +147,18 @@ with col_img:
     if show_artifact:
         show_classes.add(config.CLASS_ARTIFACT)
 
-    base = Image.open(image_path)
+    # Уменьшаем панораму на этапе декодирования — иначе гигапиксельный JPEG
+    # съест память. make_overlay сам подгонит маску под этот размер.
+    base = viewer.load_display_image(str(image_path))
     mask = load_mask(result.ml.mask_path)
     overlay = viewer.make_overlay(base, mask, show_classes=show_classes, opacity=opacity)
-    st.image(overlay, use_container_width=True)
+
+    if interactive:
+        st.components.v1.html(
+            viewer.interactive_viewer_html(overlay, height=660), height=680
+        )
+    else:
+        st.image(overlay, use_container_width=True)
 
     if result.ml.confidence_map_path and Path(result.ml.confidence_map_path).exists():
         with st.expander("Карта уверенности модели (heatmap)"):
