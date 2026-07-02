@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import base64
 import io
+from pathlib import Path
 
 import numpy as np
+import streamlit.components.v1 as components
 from PIL import Image
 
 from src import config
@@ -380,3 +382,57 @@ def interactive_viewer_html(image: Image.Image, height: int = 640) -> str:
         .replace("__W__", str(w))
         .replace("__H__", str(h))                # натуральный размер картинки (JS)
     )
+
+
+# --- Интерактивный выбор области мышью (без ползунков по X/Y) ---------------
+# Самодостаточный компонент (vanilla JS, без npm/React) — тот же подход, что и
+# interactive_viewer_html: рисуем свой HTML/JS-протокол Streamlit Components
+# вручную, никаких внешних зависимостей и CDN. Объявляется один раз на процесс.
+_REGION_PICKER_DIR = Path(__file__).resolve().parent / "region_picker_frontend"
+_region_picker_component = components.declare_component(
+    "orevision_region_picker", path=str(_REGION_PICKER_DIR)
+)
+
+
+def region_picker(
+    image: Image.Image,
+    key: str,
+    bbox: tuple[float, float, float, float] = (0.30, 0.30, 0.60, 0.60),
+    color: str = "rgba(255, 207, 51, .28)",
+    border_color: str = "#ffcf33",
+) -> tuple[float, float, float, float]:
+    """
+    Интерактивное выделение прямоугольной области на изображении: тянуть,
+    двигать, менять размер за уголки/края мышью — как выделение области на
+    рабочем столе (без отдельных ползунков по X и по Y).
+
+    bbox — начальные координаты (x0, y0, x1, y1) в долях 0..1, используются
+    только при первой отрисовке (дальше геолог управляет сам).
+    Возвращает текущие (x0, y0, x1, y1) в долях 0..1 (x0<x1, y0<y1).
+
+    Если JS-компонент по какой-то причине не пришлёт значение (например,
+    редкая несовместимость браузера), функция просто продолжит возвращать
+    bbox — сбоя не будет, только область останется на месте по умолчанию.
+    """
+    src = _to_data_uri(image)
+    default = {"x0": bbox[0], "y0": bbox[1], "x1": bbox[2], "y1": bbox[3]}
+    value = _region_picker_component(
+        src=src,
+        bbox=list(bbox),
+        color=color,
+        border_color=border_color,
+        key=key,
+        default=default,
+    )
+    if not isinstance(value, dict):
+        return bbox
+    try:
+        x0, y0, x1, y1 = (
+            float(value["x0"]), float(value["y0"]),
+            float(value["x1"]), float(value["y1"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return bbox
+    if x1 <= x0 or y1 <= y0:
+        return bbox
+    return (x0, y0, x1, y1)

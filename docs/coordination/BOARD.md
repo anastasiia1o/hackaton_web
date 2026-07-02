@@ -37,6 +37,11 @@
 - [DONE] (B) Редактор экспертной коррекции: выделение области + правильный класс, save_correction — stream-b/mask-editor (dependency-free, т.к. drawable-canvas несовместим со Streamlit 1.58)
 - [DONE] (B) Тумблеры слоёв + карта уверенности как переключаемый слой overlay — stream-b/confidence-layer
 - [DONE] (B) Интеграция выходов A: кнопка GeoJSON, обработка ContractError, история под обогащённый лог — stream-b/integrate-a-outputs
+- [DONE] (A, по прямой просьбе — см. HANDOFF) UX: ползунки "Область по X/Y" в
+  инспекторе участка и экспертной коррекции заменены на drag/resize мышью
+  (кастомный vanilla-JS компонент, без npm) — stream-a/region-picker-ux;
+  browser-тест перетаскивания не проводился (нет браузера у агента), нужна
+  ручная проверка
 
 ## Интеграция / упаковка
 
