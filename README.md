@@ -91,31 +91,38 @@ demo обычным `streamlit run app.py` из раздела 1. Он не ху
 ```
 orevision-app/
 ├── app.py                  # Streamlit: главный экран (поток B)
-├── batch_process.py        # пакетная обработка серии изображений
+├── batch_process.py        # пакетная обработка серии изображений (CLI)
+├── pages/                  # многостраничность Streamlit (поток B)
+│   ├── 1_Пакетная_обработка.py
+│   └── 2_История_и_лог.py
 ├── API_CONTRACT.md         # договор с ML-сервисом
 ├── AGENTS.md               # как работают два агента в одном репо
 ├── requirements.txt
 ├── Dockerfile / docker-compose.yml
+├── .streamlit/config.toml  # телеметрия выключена (данные не уходят в сеть)
 ├── src/                    # ЛОГИКА (поток A)
 │   ├── config.py           # пороги, цвета, пути
 │   ├── schemas.py          # SEAM — общие структуры данных
 │   ├── ml_client.py        # HTTP-клиент к ML (mock/real)
+│   ├── contract.py         # валидатор ответа ML по API_CONTRACT.md
 │   ├── metrics.py          # площади → проценты
 │   ├── classification.py   # rule-based геологика
 │   ├── pipeline.py         # склейка ML→метрики→классификация
-│   ├── reports.py          # экспорт CSV/JSON/PDF
-│   └── storage.py          # локальное хранение
+│   ├── reports.py          # экспорт CSV/JSON/PDF + run_manifest.json
+│   ├── gis_export.py       # экспорт GeoJSON/Shapefile
+│   └── storage.py          # локальное хранение, экспертные коррекции
 ├── ui/                     # ИНТЕРФЕЙС (поток B)
-│   ├── viewer.py           # overlay масок, слои
+│   ├── viewer.py           # overlay масок, zoom/pan, слои, инспектор участка
 │   └── components.py        # карточки, таблицы, легенда
 ├── mock_ml/                # локальная имитация ML по контракту
 │   └── generator.py
-├── tests/                  # тесты логики
+├── tests/                  # тесты логики (pytest)
 ├── docs/
 │   ├── AGENT_EXECUTION_PLAN.md
+│   ├── ML_INTEGRATION_GUIDE.md   # гайд для ML-команды по контракту
 │   └── coordination/       # BOARD / HANDOFF / планы потоков
-└── data/                   # ЛОКАЛЬНЫЕ данные (в Git НЕ попадают)
-    ├── uploads/  results/  samples/
+└── data/                   # ЛОКАЛЬНЫЕ данные (содержимое в Git НЕ попадает,
+    ├── uploads/  results/  samples/    # сами папки — да, через .gitkeep)
 ```
 
 ---
@@ -152,5 +159,7 @@ orevision-app/
   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 - *ML-сервис недоступен в real-режиме* — сайт покажет красный индикатор;
   вернитесь в mock (`$env:OREVISION_ML_MODE="mock"`).
-- *Большое изображение тормозит* — в MVP показывается превью; полноценный
-  tiled-вьюер в разработке (поток B).
+- *Большая панорама (проверено до ~570 Мп)* — сайт грузит уменьшенное превью
+  (≤2600px по стороне) с zoom/pan и minimap; детальный просмотр участка в
+  исходном разрешении — кнопка «🔬 Инспектор участка». Расчёт метрик по маске
+  для панорам >10000px идёт по тайлам, не грузя всё в память.

@@ -16,11 +16,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Данные остаются локальными (монтируются volume-ом из docker-compose).
+# STREAMLIT_BROWSER_GATHERUSAGESTATS=false и HEADLESS=true — без них Streamlit
+# в контейнере без TTY может ждать интерактивного ввода при первом запуске
+# и отправлять анонимную телеметрию (нарушая "всё работает локально").
 ENV OREVISION_ML_MODE=mock \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_BROWSER_GATHERUSAGESTATS=false
 
 EXPOSE 8501
 
 # Запуск сайта, доступного снаружи контейнера.
 CMD ["streamlit", "run", "app.py", \
-     "--server.address=0.0.0.0", "--server.port=8501"]
+     "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]
