@@ -32,7 +32,7 @@
 
 - [DONE] (B) Zoom/pan для больших изображений (самодостаточный inline-вьюер) — stream-b/viewer-zoom
 - [DONE] (B) Minimap/навигатор по панораме (встроен в вьюер) — stream-b/viewer-zoom
-- [TODO] (B) Тайловая ленивая загрузка больших TIFF (без зависаний) — сейчас decode-downscale до 2600px
+- [DONE] (B) Инспектор участка в высоком разрешении (ленивый decode по кнопке, лимит памяти) — stream-b/region-inspector; полноценный DeepZoom-пирамидный вьюер не делаем (нужна vendored JS-либа/статик-сервинг — против clean-machine)
 - [DONE] (B) Многостраничность: страница «Batch», страница «История/лог» — stream-b/multipage
 - [DONE] (B) Редактор экспертной коррекции: выделение области + правильный класс, save_correction — stream-b/mask-editor (dependency-free, т.к. drawable-canvas несовместим со Streamlit 1.58)
 - [DONE] (B) Тумблеры слоёв + карта уверенности как переключаемый слой overlay — stream-b/confidence-layer

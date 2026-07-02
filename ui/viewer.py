@@ -65,6 +65,66 @@ def make_overlay(
     return Image.alpha_composite(base, overlay)
 
 
+# Потолок памяти при инспекции: сколько мегапикселей максимум декодируем за раз.
+# Гигапиксельный JPEG нельзя crop'нуть без полного декодирования, поэтому
+# ограничиваем пиковую память (≈ N Мп * 3 байта).
+INSPECT_MAX_MP = 120
+
+
+def crop_region_highres(
+    image_path: str,
+    x0f: float, y0f: float, x1f: float, y1f: float,
+    out_max: int = 1600,
+    decode_cap_mp: int = INSPECT_MAX_MP,
+) -> tuple[Image.Image, dict]:
+    """
+    Вырезать участок изображения в максимально возможном разрешении (в пределах
+    лимита памяти) — «инспектор» для панорам.
+
+    Координаты участка — в долях (0..1). Для нормальных изображений возвращаем
+    участок в НАТИВНОМ разрешении; для гигапиксельных сначала декодируем с
+    понижением до decode_cap_mp Мп (иначе не хватит памяти), поэтому детализация
+    ограничена — об этом сообщаем во втором элементе (dict с метаданными).
+    """
+    Image.MAX_IMAGE_PIXELS = None
+    im = Image.open(image_path)
+    W0, H0 = im.size
+    full_mp = (W0 * H0) / 1e6
+
+    # Насколько пришлось понизить полное изображение, чтобы влезть в лимит памяти.
+    if full_mp > decode_cap_mp:
+        factor = (full_mp / decode_cap_mp) ** 0.5
+        try:
+            im.draft("RGB", (int(W0 / factor), int(H0 / factor)))
+        except Exception:
+            pass
+    im = im.convert("RGB")
+    Wd, Hd = im.size                      # реальный размер после draft-декода
+    native_scale = Wd / W0                # 1.0 = нативно, <1 = понижено
+
+    x0, y0 = int(min(x0f, x1f) * Wd), int(min(y0f, y1f) * Hd)
+    x1, y1 = int(max(x0f, x1f) * Wd), int(max(y0f, y1f) * Hd)
+    x1 = max(x1, x0 + 1)
+    y1 = max(y1, y0 + 1)
+    crop = im.crop((x0, y0, x1, y1))
+
+    downscaled = False
+    if max(crop.size) > out_max:
+        crop.thumbnail((out_max, out_max), Image.LANCZOS)
+        downscaled = True
+
+    meta = {
+        "orig_size": (W0, H0),
+        "region_px_orig": [int(min(x0f, x1f) * W0), int(min(y0f, y1f) * H0),
+                           int(abs(x1f - x0f) * W0), int(abs(y1f - y0f) * H0)],
+        "native_scale": round(native_scale, 4),     # 1.0 => участок нативный
+        "shown_size": crop.size,
+        "capped": native_scale < 1.0,                # True => исходник был понижен
+        "shown_downscaled": downscaled,
+    }
+    return crop, meta
+
+
 def preview_region(
     image: Image.Image,
     x0f: float, y0f: float, x1f: float, y1f: float,
