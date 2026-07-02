@@ -1,0 +1,218 @@
+"""
+OreVision — локальный веб-интерфейс (Streamlit).
+
+Запуск (Windows PowerShell, из корня репозитория, при активном .venv):
+    streamlit run app.py
+Затем открыть в браузере:  http://localhost:8501
+
+Это ГЛАВНЫЙ экран сквозного сценария:
+    загрузка изображения → анализ (ML) → overlay-маска + слои →
+    метрики → rule-based классификация → экспорт (CSV/JSON/PDF).
+
+Работает в MOCK-режиме без ML-сервиса (config.ML_MODE = "mock").
+Когда ML-команда поднимет сервис — переключаемся на "real" одной настройкой.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import streamlit as st
+from PIL import Image
+
+from src import config, ml_client, reports, storage
+from src.pipeline import run_analysis, load_mask
+from ui import viewer, components
+
+# --- Общая настройка страницы ----------------------------------------------
+st.set_page_config(page_title="OreVision", page_icon="⛏️", layout="wide")
+config.ensure_dirs()
+
+# --- Боковая панель: режим ML, статус, сценарий (для демо) ------------------
+with st.sidebar:
+    st.title("⛏️ OreVision")
+    st.caption("Локальный анализ полированных шлифов руды")
+
+    ok, msg = ml_client.health_check()
+    (st.success if ok else st.error)(msg)
+
+    st.divider()
+    st.subheader("Режим ML")
+    st.write(f"Текущий режим: **{config.ML_MODE.upper()}**")
+    st.caption(
+        "Смените режим переменной окружения `OREVISION_ML_MODE=real`, "
+        "чтобы подключить реальный ML-сервис на :8001."
+    )
+
+    scenario = None
+    if config.ML_MODE == "mock":
+        st.subheader("Демо-сценарий (mock)")
+        scenario = st.selectbox(
+            "Какой тип руды имитировать",
+            options=["refractory", "ordinary", "talc", "review"],
+            format_func=lambda s: {
+                "refractory": "Труднообогатимая (тонкие)",
+                "ordinary": "Рядовая (обычные)",
+                "talc": "Оталькованная (тальк >10%)",
+                "review": "Пограничный (проверка)",
+            }[s],
+        )
+
+    st.divider()
+    st.subheader("Слои маски")
+    show_ordinary = st.checkbox("Обычные срастания (зелёный)", value=True)
+    show_fine = st.checkbox("Тонкие срастания (красный)", value=True)
+    show_talc = st.checkbox("Тальк (синий)", value=True)
+    show_artifact = st.checkbox("Артефакты (серый)", value=False)
+    opacity = st.slider("Прозрачность маски", 0.0, 1.0, 0.55, 0.05)
+
+# --- Заголовок и легенда ----------------------------------------------------
+st.header("Анализ изображения шлифа")
+components.legend_bar()
+
+uploaded = st.file_uploader(
+    "Загрузите OM-изображение шлифа (TIFF / PNG / JPEG)",
+    type=[e.lstrip(".") for e in config.SUPPORTED_FORMATS],
+)
+
+# Кнопка "демо без файла" — удобно показывать жюри без загрузки.
+demo = st.button("Показать на демо-образце (без загрузки файла)")
+
+
+def _resolve_input() -> Path | None:
+    """Определить, какое изображение анализировать: загруженное или демо."""
+    if uploaded is not None:
+        path = storage.save_upload(uploaded.getvalue(), uploaded.name)
+        return path
+    if demo:
+        # Создаём простой серый холст как "исходник" под mock-маску.
+        config.ensure_dirs()
+        demo_path = config.SAMPLES_DIR / "demo_slide.png"
+        if not demo_path.exists():
+            Image.new("RGB", (900, 700), (60, 60, 66)).save(demo_path)
+        return demo_path
+    return None
+
+
+image_path = _resolve_input()
+
+if image_path is None:
+    st.info("Загрузите изображение или нажмите «Показать на демо-образце».")
+    st.stop()
+
+# --- Предупреждение о размере панорамы -------------------------------------
+with Image.open(image_path) as im:
+    w, h = im.size
+if max(w, h) > config.MAX_DIMENSION_WARN:
+    st.warning(
+        f"Большое панорамное изображение ({w}×{h}). В MVP превью масштабируется; "
+        f"tiled-просмотр для полного разрешения — в разработке (поток B)."
+    )
+
+# --- Запуск анализа ---------------------------------------------------------
+with st.spinner("Анализируем изображение…"):
+    params = {"scenario": scenario} if scenario else None
+    result = run_analysis(str(image_path), params=params)
+
+# --- Итоговая классификация -------------------------------------------------
+components.classification_card(result)
+components.rule_trace(result)
+
+# --- Overlay + метрики бок о бок -------------------------------------------
+col_img, col_metrics = st.columns([3, 2])
+
+with col_img:
+    st.subheader("Изображение с цветовой маской")
+    show_classes = set()
+    if show_ordinary:
+        show_classes.add(config.CLASS_ORDINARY)
+    if show_fine:
+        show_classes.add(config.CLASS_FINE)
+    if show_talc:
+        show_classes.add(config.CLASS_TALC)
+    if show_artifact:
+        show_classes.add(config.CLASS_ARTIFACT)
+
+    base = Image.open(image_path)
+    mask = load_mask(result.ml.mask_path)
+    overlay = viewer.make_overlay(base, mask, show_classes=show_classes, opacity=opacity)
+    st.image(overlay, use_container_width=True)
+
+    if result.ml.confidence_map_path and Path(result.ml.confidence_map_path).exists():
+        with st.expander("Карта уверенности модели (heatmap)"):
+            st.image(result.ml.confidence_map_path, use_container_width=True,
+                     caption="Ярче = увереннее")
+
+with col_metrics:
+    st.subheader("Количественные метрики")
+    components.metrics_table(result)
+    if result.ml.warnings:
+        for wmsg in result.ml.warnings:
+            st.warning(wmsg)
+
+# --- Экспорт ----------------------------------------------------------------
+st.divider()
+st.subheader("Экспорт результатов")
+
+# Сохраняем overlay в PNG (для PDF и для скачивания).
+overlay_png = storage.result_dir(str(image_path)) / "overlay.png"
+overlay.convert("RGB").save(overlay_png)
+
+exp_col1, exp_col2, exp_col3, exp_col4 = st.columns(4)
+
+with exp_col1:
+    st.download_button(
+        "Скачать CSV",
+        data=reports.csv_bytes(result),
+        file_name=f"{image_path.stem}_metrics.csv",
+        mime="text/csv",
+    )
+with exp_col2:
+    import json
+    st.download_button(
+        "Скачать JSON",
+        data=json.dumps(result.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name=f"{image_path.stem}_result.json",
+        mime="application/json",
+    )
+with exp_col3:
+    with open(overlay_png, "rb") as f:
+        st.download_button(
+            "Скачать маску (PNG)",
+            data=f.read(),
+            file_name=f"{image_path.stem}_overlay.png",
+            mime="image/png",
+        )
+with exp_col4:
+    if st.button("Сформировать PDF-отчёт"):
+        with st.spinner("Собираем PDF…"):
+            pdf_path = reports.export_pdf(result, overlay_png=overlay_png)
+        with open(pdf_path, "rb") as f:
+            st.download_button(
+                "Скачать PDF",
+                data=f.read(),
+                file_name=f"{image_path.stem}_report.pdf",
+                mime="application/pdf",
+            )
+
+# --- Экспертная коррекция (заглушка режима active learning) -----------------
+st.divider()
+with st.expander("Экспертная проверка: отметить ошибочный участок"):
+    st.caption(
+        "Сохраняется локально для будущего дообучения ML. "
+        "Полноценный редактор маски — задача потока B."
+    )
+    corr_class = st.selectbox(
+        "Правильный класс участка",
+        options=[config.CLASS_ORDINARY, config.CLASS_FINE, config.CLASS_TALC, config.CLASS_ARTIFACT],
+        format_func=lambda c: config.CLASS_NAMES[c],
+    )
+    comment = st.text_input("Комментарий геолога")
+    if st.button("Сохранить исправление"):
+        saved = storage.save_correction(str(image_path), {
+            "correct_class": corr_class,
+            "comment": comment,
+            "author": "geolog",
+        })
+        st.success(f"Исправление сохранено: {saved.name}")

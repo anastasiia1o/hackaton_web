@@ -1,0 +1,23 @@
+# OreVision — запуск demo-режима одной командой:  docker compose up --build
+# Открыть в браузере:  http://localhost:8501
+services:
+  app:
+    build: .
+    container_name: orevision-app
+    ports:
+      - "8501:8501"
+    environment:
+      # По умолчанию mock. Чтобы подключить реальный ML-сервис, раскомментируйте
+      # и укажите адрес (ML-контейнер должен быть в этой же сети).
+      OREVISION_ML_MODE: "mock"
+      # OREVISION_ML_MODE: "real"
+      # OREVISION_ML_URL: "http://ml:8001"
+    volumes:
+      # Данные остаются на хосте — ничего не теряется при пересборке образа.
+      - ./data:/app/data
+
+  # --- Когда команда orevision-ml будет готова, добавьте сюда их сервис: ---
+  # ml:
+  #   image: orevision-ml:latest        # образ из репозитория ML-команды
+  #   ports:
+  #     - "8001:8001"
