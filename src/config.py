@@ -82,6 +82,11 @@ CLASS_COLORS = {
 MAX_DIMENSION_WARN = 10000     # предупреждать про панорамы больше 10000 px
 SUPPORTED_FORMATS = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 
+# Метрики: маски панорам с любой стороной > MAX_DIMENSION_WARN считаются
+# тайлами (src/metrics.py: compute_metrics_from_mask_path), чтобы не грузить
+# всю маску в RAM разом. Размер тайла в пикселях (квадрат).
+METRICS_TILE_SIZE = 2048
+
 
 def ensure_dirs() -> None:
     """Создать все локальные папки данных, если их ещё нет."""

@@ -17,9 +17,18 @@
 from __future__ import annotations
 
 import numpy as np
+from PIL import Image
 
 from . import config
 from .schemas import MLResponse, Metrics
+
+_ALL_CLASSES = (
+    config.CLASS_BACKGROUND,
+    config.CLASS_ORDINARY,
+    config.CLASS_FINE,
+    config.CLASS_TALC,
+    config.CLASS_ARTIFACT,
+)
 
 
 def _safe_div(a: float, b: float) -> float:
@@ -27,24 +36,14 @@ def _safe_div(a: float, b: float) -> float:
     return float(a) / float(b) if b else 0.0
 
 
-def compute_metrics(mask: np.ndarray, ml: MLResponse) -> Metrics:
-    """
-    mask — 2D-массив uint8, где значение пикселя = код класса (0..4).
-    ml   — ответ ML-сервиса (нужен для средней уверенности по объектам).
-    """
-    total_px = int(mask.size)
+def _count_classes(mask: np.ndarray) -> dict[int, int]:
+    """Площадь каждого класса в куске маски (попиксельно)."""
+    return {cls: int(np.count_nonzero(mask == cls)) for cls in _ALL_CLASSES}
 
-    # Площадь каждого класса — попиксельно по маске.
-    class_area_px: dict[int, int] = {}
-    for cls in (
-        config.CLASS_BACKGROUND,
-        config.CLASS_ORDINARY,
-        config.CLASS_FINE,
-        config.CLASS_TALC,
-        config.CLASS_ARTIFACT,
-    ):
-        class_area_px[cls] = int(np.count_nonzero(mask == cls))
 
+def _finalize(class_area_px: dict[int, int], total_px: int, ml: MLResponse) -> Metrics:
+    """Собрать Metrics из уже посчитанных площадей классов (общий путь для
+    обычного и тайлового расчёта — формулы должны совпадать один в один)."""
     artifact_px = class_area_px[config.CLASS_ARTIFACT]
     valid_px = total_px - artifact_px  # ключевая формула: убираем артефакты
 
@@ -53,7 +52,7 @@ def compute_metrics(mask: np.ndarray, ml: MLResponse) -> Metrics:
     fine_px = class_area_px[config.CLASS_FINE]
     sulphide_px = ordinary_px + fine_px
 
-    metrics = Metrics(
+    return Metrics(
         total_px=total_px,
         valid_px=valid_px,
         artifact_px=artifact_px,
@@ -66,7 +65,46 @@ def compute_metrics(mask: np.ndarray, ml: MLResponse) -> Metrics:
         artifact_fraction=_safe_div(artifact_px, total_px),
         mean_confidence=_mean_confidence(ml),
     )
-    return metrics
+
+
+def compute_metrics(mask: np.ndarray, ml: MLResponse) -> Metrics:
+    """
+    mask — 2D-массив uint8, где значение пикселя = код класса (0..4).
+    ml   — ответ ML-сервиса (нужен для средней уверенности по объектам).
+    """
+    total_px = int(mask.size)
+    class_area_px = _count_classes(mask)
+    return _finalize(class_area_px, total_px, ml)
+
+
+def compute_metrics_from_mask_path(
+    mask_path: str,
+    ml: MLResponse,
+    tile_size: int = config.METRICS_TILE_SIZE,
+) -> Metrics:
+    """
+    То же самое, что compute_metrics, но НЕ грузит всю маску в RAM разом —
+    читает и агрегирует по прямоугольным тайлам. Нужно для панорам
+    больше config.MAX_DIMENSION_WARN px (см. PLAN_AGENT_A.md, п.3).
+
+    Результат идентичен compute_metrics(load_mask(mask_path), ml) — тайлы не
+    пересекаются и покрывают изображение целиком, площади классов суммируются.
+    """
+    class_area_px: dict[int, int] = {cls: 0 for cls in _ALL_CLASSES}
+    total_px = 0
+    with Image.open(mask_path) as img:
+        img = img.convert("L")
+        w, h = img.size
+        for top in range(0, h, tile_size):
+            bottom = min(top + tile_size, h)
+            for left in range(0, w, tile_size):
+                right = min(left + tile_size, w)
+                tile = np.asarray(img.crop((left, top, right, bottom)), dtype=np.uint8)
+                total_px += tile.size
+                tile_counts = _count_classes(tile)
+                for cls, n in tile_counts.items():
+                    class_area_px[cls] += n
+    return _finalize(class_area_px, total_px, ml)
 
 
 def _mean_confidence(ml: MLResponse) -> float:
