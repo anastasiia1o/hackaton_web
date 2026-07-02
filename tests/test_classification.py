@@ -106,3 +106,44 @@ def test_valid_area_excludes_artifacts():
     m = compute_metrics(mask, _ml())
     assert m.valid_px == 10000 - 5000
     assert m.artifact_fraction == 0.5
+
+
+# --- Закалка: вырожденные и пограничные случаи -----------------------------
+
+def test_all_artifacts_no_valid_area():
+    # Всё изображение — артефакты: валидной площади нет → проверка.
+    mask = _mask_from_counts({config.CLASS_ARTIFACT: 10000}, total=10000)
+    m = compute_metrics(mask, _ml())
+    c = classify(m)
+    assert m.valid_px == 0
+    assert c.ore_class == ORE_REVIEW
+    assert c.needs_review
+
+
+def test_no_sulphides_needs_review():
+    # Сульфидов нет, талька мало: тип срастаний определить нельзя → проверка.
+    mask = _mask_from_counts({config.CLASS_TALC: 100}, total=10000)
+    m = compute_metrics(mask, _ml())
+    c = classify(m)
+    assert c.ore_class == ORE_REVIEW
+
+
+def test_tie_fifty_fifty_needs_review():
+    # Обычные и тонкие поровну (50/50): нет преобладания → проверка.
+    mask = _mask_from_counts({
+        config.CLASS_TALC: 100,
+        config.CLASS_ORDINARY: 1500,
+        config.CLASS_FINE: 1500,
+    })
+    m = compute_metrics(mask, _ml())
+    c = classify(m)
+    assert abs(m.fine_of_sulphides - 0.5) < 1e-6
+    assert c.ore_class == ORE_REVIEW
+
+
+def test_empty_mask_does_not_crash():
+    # Полностью пустая маска (только фон) не должна ронять расчёт.
+    mask = _mask_from_counts({}, total=10000)
+    m = compute_metrics(mask, _ml())
+    c = classify(m)
+    assert c.ore_class == ORE_REVIEW  # нет сульфидов → проверка

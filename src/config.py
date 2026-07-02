@@ -24,6 +24,10 @@ UPLOADS_DIR = DATA_DIR / "uploads"     # исходные изображения
 RESULTS_DIR = DATA_DIR / "results"     # маски, confidence, отчёты, JSON
 SAMPLES_DIR = DATA_DIR / "samples"     # демонстрационные образцы
 
+# --- Версии (для воспроизводимости и логов) --------------------------------
+APP_VERSION = "0.2.0"          # версия сайта OreVision
+CONTRACT_VERSION = "v1"        # версия API-контракта с ML
+
 # --- Настройки ML-сервиса ---------------------------------------------------
 # По умолчанию работаем в MOCK-режиме, чтобы сайт можно было запустить
 # и показать ДО того, как ML-команда поднимет свой сервис.
@@ -31,6 +35,8 @@ ML_MODE = os.getenv("OREVISION_ML_MODE", "mock")          # "mock" | "real"
 ML_SERVICE_URL = os.getenv("OREVISION_ML_URL", "http://localhost:8001")
 ML_ANALYZE_ENDPOINT = f"{ML_SERVICE_URL}/analyze"
 ML_TIMEOUT_SEC = int(os.getenv("OREVISION_ML_TIMEOUT", "300"))  # до 5 минут на панораму
+# Проверять каждый ответ ML валидатором контракта (src/contract.py).
+VALIDATE_ML_RESPONSE = os.getenv("OREVISION_VALIDATE_ML", "1") != "0"
 
 # --- Геологические пороги классификации ------------------------------------
 # ЕДИНЫЙ источник правды для правил классификации (см. src/classification.py).
@@ -42,6 +48,10 @@ TALC_BORDERLINE_HIGH = 0.11    # 11%
 LOW_CONFIDENCE_THRESHOLD = 0.55
 # Доля артефактов, выше которой изображение считается "грязным".
 ARTIFACT_WARN_FRACTION = 0.30  # >30% площади — артефакты
+# Зона "ничья" вокруг 50/50 обычные/тонкие -> нет явного преобладания -> проверка.
+TIE_MARGIN = 0.02              # |доля тонких среди сульфидов − 0.5| < 0.02 → ничья
+# Минимальная доля сульфидов, ниже которой тип срастаний определять нельзя.
+MIN_SULPHIDE_FRACTION = 0.005  # 0.5% валидной площади
 
 # --- Коды классов (ДОЛЖНЫ совпадать с API_CONTRACT.md и ML-командой) --------
 CLASS_BACKGROUND = 0   # фон / нерудная матрица

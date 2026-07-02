@@ -37,6 +37,12 @@ def classify(m: Metrics) -> Classification:
     """
     Применить геологические правила к посчитанным метрикам.
     Возвращает итоговый класс + человекочитаемое объяснение + след правил.
+
+    Порядок проверок:
+      0) вырожденные случаи (нет валидной площади, нет сульфидов) → проверка;
+      4) пограничность (тальк 9–11%, низкая уверенность, много артефактов) → проверка;
+      2) тальк > 10% → оталькованная (приоритет);
+      3) преобладание тонких/обычных → трудная/рядовая; ничья 50/50 → проверка.
     """
     trace: list[str] = []
 
@@ -44,6 +50,25 @@ def classify(m: Metrics) -> Classification:
     fine_of_sulph_pct = m.fine_of_sulphides * 100
     artifact_pct = m.artifact_fraction * 100
     conf_pct = m.mean_confidence * 100
+
+    sulphide_px = (
+        m.class_area_px.get(config.CLASS_ORDINARY, 0)
+        + m.class_area_px.get(config.CLASS_FINE, 0)
+    )
+
+    # --- ПРАВИЛО 0a: нет валидной площади (всё — артефакты/пусто) ----------
+    if m.valid_px <= 0:
+        trace.append("Валидная площадь равна нулю (изображение — сплошь артефакты/пустое).")
+        return Classification(
+            ore_class=ORE_REVIEW,
+            reason=(
+                "Классификация невозможна: после исключения артефактов не осталось "
+                f"валидной площади (артефакты — {artifact_pct:.1f}% изображения). "
+                "Требуется другой снимок или ручная проверка."
+            ),
+            needs_review=True,
+            rule_trace=trace,
+        )
 
     # --- Флаги "пограничности" (собираем, решаем в конце) ------------------
     borderline_talc = (
@@ -104,10 +129,39 @@ def classify(m: Metrics) -> Classification:
             rule_trace=trace,
         )
 
+    # --- ПРАВИЛО 0b: сульфидов почти нет — тип срастаний определить нельзя --
+    if m.sulphide_fraction < config.MIN_SULPHIDE_FRACTION or sulphide_px == 0:
+        trace.append("Сульфиды практически отсутствуют — преобладание определить нельзя.")
+        return Classification(
+            ore_class=ORE_REVIEW,
+            reason=(
+                "Сульфидные срастания на изображении почти не обнаружены "
+                f"({m.sulphide_fraction*100:.1f}% валидной площади), "
+                "поэтому тип срастаний определить нельзя. Требуется экспертная проверка."
+            ),
+            needs_review=True,
+            rule_trace=trace,
+        )
+
     # --- ПРАВИЛО 3: тип срастаний ------------------------------------------
     trace.append(
         f"Тальк в норме. Доля тонких среди сульфидов: {fine_of_sulph_pct:.1f}%."
     )
+
+    # Ничья 50/50 (в пределах TIE_MARGIN): явного преобладания нет → проверка.
+    if abs(m.fine_of_sulphides - 0.5) < config.TIE_MARGIN:
+        trace.append("Обычные и тонкие срастания примерно поровну (ничья) → проверка.")
+        return Classification(
+            ore_class=ORE_REVIEW,
+            reason=(
+                f"Обычные и тонкие срастания представлены примерно поровну "
+                f"(тонких {fine_of_sulph_pct:.1f}% среди сульфидов), явного преобладания нет. "
+                "Требуется экспертная проверка."
+            ),
+            needs_review=True,
+            rule_trace=trace,
+        )
+
     if m.fine_of_sulphides > 0.5:
         trace.append("Преобладают тонкие срастания → Труднообогатимая руда.")
         reason = (

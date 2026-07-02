@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import config
+from . import contract
 from .schemas import MLResponse
 
 
@@ -26,16 +27,29 @@ def analyze(
     image_path: str,
     params: Optional[dict[str, Any]] = None,
     mode: Optional[str] = None,
+    validate: Optional[bool] = None,
 ) -> MLResponse:
     """
     Проанализировать одно изображение. Возвращает MLResponse (см. schemas.py).
     mode переопределяет config.ML_MODE (удобно для тестов и batch).
+
+    Перед разбором ответ прогоняется через валидатор контракта
+    (src/contract.py). Если ML прислал что-то не по контракту — упадём с
+    ПОНЯТНОЙ ошибкой ContractError, а не где-то в глубине metrics.
     """
     mode = mode or config.ML_MODE
+    if validate is None:
+        validate = config.VALIDATE_ML_RESPONSE
+
     if mode == "real":
         raw = _analyze_real(image_path, params)
     else:
         raw = _analyze_mock(image_path, params)
+
+    if validate:
+        # Жёсткие нарушения -> ContractError; мягкие ([warning]) не роняют.
+        contract.assert_valid(raw)
+
     return MLResponse.from_json(raw)
 
 

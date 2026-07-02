@@ -12,8 +12,9 @@ import csv
 import io
 import json
 from pathlib import Path
+from typing import Any
 
-from . import storage
+from . import config, storage
 from .metrics import as_percent_rows
 from .schemas import AnalysisResult
 
@@ -135,18 +136,32 @@ def export_pdf(result: AnalysisResult, overlay_png: Path | None = None) -> Path:
     return path
 
 
-def export_all(result: AnalysisResult, overlay_png: Path | None = None) -> dict[str, Path]:
-    """Экспортировать всё сразу и записать в лог. Удобно для batch."""
-    paths = {
+def export_all(result: AnalysisResult, overlay_png: Path | None = None) -> dict[str, Any]:
+    """
+    Экспортировать всё сразу: CSV, JSON, PDF, GeoJSON, Shapefile (если есть pyshp),
+    сохранить «паспорт прогона» и записать строку в общий лог. Удобно для batch.
+    """
+    from . import gis_export  # локальный импорт: избегаем циклов на старте
+
+    gis = gis_export.export_gis(result)
+    paths: dict[str, Any] = {
         "json": export_json(result),
         "csv": export_csv(result),
         "pdf": export_pdf(result, overlay_png=overlay_png),
+        "geojson": gis["geojson"],
+        "shapefile": gis["shapefile"],           # может быть None, если нет pyshp
+        "manifest": storage.save_run_manifest(result),
     }
+    # Обогащённый лог: версия модели, пороги, параметры — для воспроизводимости.
     storage.append_log({
         "image": result.image_name,
         "ore_class": result.classification.ore_class,
+        "needs_review": result.classification.needs_review,
         "talc_fraction": round(result.metrics.talc_fraction, 4),
         "fine_of_sulphides": round(result.metrics.fine_of_sulphides, 4),
         "model_version": result.ml.model_version,
+        "inference_time_ms": result.ml.inference_time_ms,
+        "app_version": config.APP_VERSION,
+        "thresholds": storage.thresholds_snapshot(),
     })
     return paths
