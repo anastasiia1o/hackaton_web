@@ -258,23 +258,68 @@ with exp_col5:
                 mime="application/pdf",
             )
 
-# --- Экспертная коррекция (заглушка режима active learning) -----------------
+# --- Экспертная коррекция: выделить участок и указать правильный класс -------
 st.divider()
-with st.expander("Экспертная проверка: отметить ошибочный участок"):
+with st.expander("Экспертная проверка: отметить и исправить участок (active learning)"):
     st.caption(
-        "Сохраняется локально для будущего дообучения ML. "
-        "Полноценный редактор маски — задача потока B."
+        "Выделите прямоугольную область, где модель ошиблась, и укажите "
+        "правильный класс. Исправление сохраняется локально (для будущего "
+        "дообучения ML). Координаты — в долях изображения, поэтому не зависят "
+        "от масштаба превью."
     )
-    corr_class = st.selectbox(
-        "Правильный класс участка",
-        options=[config.CLASS_ORDINARY, config.CLASS_FINE, config.CLASS_TALC, config.CLASS_ARTIFACT],
-        format_func=lambda c: config.CLASS_NAMES[c],
-    )
-    comment = st.text_input("Комментарий геолога")
-    if st.button("Сохранить исправление"):
-        saved = storage.save_correction(str(image_path), {
-            "correct_class": corr_class,
-            "comment": comment,
-            "author": "geolog",
-        })
-        st.success(f"Исправление сохранено: {saved.name}")
+    ed_ctrl, ed_prev = st.columns([2, 3])
+    with ed_ctrl:
+        x_range = st.slider("Область по X (доля ширины)", 0.0, 1.0, (0.30, 0.60), 0.01)
+        y_range = st.slider("Область по Y (доля высоты)", 0.0, 1.0, (0.30, 0.60), 0.01)
+        corr_class = st.selectbox(
+            "Правильный класс участка",
+            options=[config.CLASS_ORDINARY, config.CLASS_FINE,
+                     config.CLASS_TALC, config.CLASS_ARTIFACT],
+            format_func=lambda c: config.CLASS_NAMES[c],
+        )
+        comment = st.text_input("Комментарий геолога")
+        author = st.text_input("Автор", value="geolog")
+        save_corr = st.button("Сохранить исправление")
+
+    with ed_prev:
+        region_color = config.CLASS_COLORS.get(corr_class, (255, 210, 60, 90))
+        region_color = (region_color[0], region_color[1], region_color[2], 90)
+        preview = viewer.preview_region(
+            base, x_range[0], y_range[0], x_range[1], y_range[1], color=region_color
+        )
+        st.image(preview, use_container_width=True,
+                 caption="Предпросмотр выделенной области")
+
+    if save_corr:
+        # Доли -> пиксели ОРИГИНАЛЬНОГО изображения (w, h — исходный размер).
+        px0, py0 = int(min(x_range) * w), int(min(y_range) * h)
+        px1, py1 = int(max(x_range) * w), int(max(y_range) * h)
+        if px1 <= px0 or py1 <= py0:
+            st.warning("Область пустая — сдвиньте ползунки, чтобы задать прямоугольник.")
+        else:
+            saved = storage.save_correction(str(image_path), {
+                "correct_class": corr_class,
+                "correct_class_name": config.CLASS_NAMES[corr_class],
+                "bbox_px": [px0, py0, px1 - px0, py1 - py0],
+                "region_fraction": {
+                    "x0": round(min(x_range), 4), "y0": round(min(y_range), 4),
+                    "x1": round(max(x_range), 4), "y1": round(max(y_range), 4),
+                },
+                "image_size": {"width": w, "height": h},
+                "comment": comment,
+                "author": author or "geolog",
+            })
+            st.success(f"Исправление сохранено: {saved.name}")
+
+    existing = storage.list_corrections(str(image_path))
+    if existing:
+        st.caption(f"Сохранённых исправлений по этому изображению: {len(existing)}")
+        st.dataframe(
+            [{
+                "класс": c.get("correct_class_name", c.get("correct_class")),
+                "bbox_px": c.get("bbox_px"),
+                "комментарий": c.get("comment", ""),
+                "автор": c.get("author", ""),
+            } for c in existing],
+            use_container_width=True, hide_index=True,
+        )

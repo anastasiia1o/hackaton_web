@@ -34,7 +34,7 @@
 - [DONE] (B) Minimap/навигатор по панораме (встроен в вьюер) — stream-b/viewer-zoom
 - [TODO] (B) Тайловая ленивая загрузка больших TIFF (без зависаний) — сейчас decode-downscale до 2600px
 - [DONE] (B) Многостраничность: страница «Batch», страница «История/лог» — stream-b/multipage
-- [TODO] (B) Полноценный редактор экспертной коррекции маски (рисование области)
+- [DONE] (B) Редактор экспертной коррекции: выделение области + правильный класс, save_correction — stream-b/mask-editor (dependency-free, т.к. drawable-canvas несовместим со Streamlit 1.58)
 - [DONE] (B) Тумблеры слоёв + карта уверенности как переключаемый слой overlay — stream-b/confidence-layer
 - [DONE] (B) Интеграция выходов A: кнопка GeoJSON, обработка ContractError, история под обогащённый лог — stream-b/integrate-a-outputs
 
