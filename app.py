@@ -329,14 +329,14 @@ if save_corr:
         })
         st.success(f"Исправление сохранено: {saved.name}")
 
-# --- История исправлений: было → стало (персистентно, не зависит от кликов) --
+# --- История исправлений (персистентно, не зависит от кликов) ---------------
 existing_corrections = storage.list_corrections(str(image_path))
 if existing_corrections:
-    st.markdown(f"**История исправлений этого изображения ({len(existing_corrections)}) — было → стало**")
+    st.markdown(f"**История исправлений этого изображения ({len(existing_corrections)})**")
     st.dataframe(
         [{
-            "Было": c.get("was_class_name", "—"),
-            "Стало": c.get("correct_class_name", c.get("correct_class")),
+            "Исходный класс": c.get("was_class_name", "—"),
+            "Класс эксперта": c.get("correct_class_name", c.get("correct_class")),
             "Комментарий": c.get("comment", ""),
             "Автор": c.get("author", ""),
             "Когда": c.get("created_at", ""),
