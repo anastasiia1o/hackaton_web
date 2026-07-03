@@ -287,7 +287,8 @@ def interactive_viewer_html(image: Image.Image, height: int = 640) -> str:
     <button id="ov-out" title="Отдалить">&minus;</button>
     <span id="ov-pct">100%</span>
     <button id="ov-in" title="Приблизить">+</button>
-    <button id="ov-fit" title="Вписать / сброс">⤢</button>
+    <button id="ov-fit" title="Вписать в экран">⤢</button>
+    <button id="ov-1to1" title="Масштаб 1:1 (нативные пиксели)">1:1</button>
   </div>
   <div id="ov-mini"><img id="ov-mini-img" src="__SRC__"/><div id="ov-vp"></div></div>
   <div id="ov-hint">Колесо — зум · тянуть — панорама · двойной клик — сброс</div>
@@ -338,6 +339,12 @@ def interactive_viewer_html(image: Image.Image, height: int = 640) -> str:
     var ix=(cx-tx)/s, iy=(cy-ty)/s;
     s=ns; tx=cx-ix*s; ty=cy-iy*s; apply();
   }
+  function setScaleAt(cx, cy, target){
+    // Абсолютный масштаб (не привязанный к "fit"), чтобы «1:1» всегда достижим.
+    var ns=clamp(target, 0.02, 64);
+    var ix=(cx-tx)/s, iy=(cy-ty)/s;
+    s=ns; tx=cx-ix*s; ty=cy-iy*s; apply();
+  }
   root.addEventListener('wheel', function(e){
     e.preventDefault();
     var r=root.getBoundingClientRect();
@@ -362,6 +369,7 @@ def interactive_viewer_html(image: Image.Image, height: int = 640) -> str:
   document.getElementById('ov-in').onclick=function(){zoomAt(cw()/2,ch()/2,1.4);};
   document.getElementById('ov-out').onclick=function(){zoomAt(cw()/2,ch()/2,1/1.4);};
   document.getElementById('ov-fit').onclick=function(){doFit();};
+  document.getElementById('ov-1to1').onclick=function(){setScaleAt(cw()/2,ch()/2,1.0);};
 
   // клик по minimap — центрируем окно на выбранной точке
   mini.addEventListener('click', function(e){

@@ -11,6 +11,8 @@ venv/
 data/uploads/*
 data/results/*
 data/samples/*
+data/datasets/*
+data/logs/*
 # но сами папки сохраняем в репозитории (иначе на чистом клоне их не будет)
 !data/**/.gitkeep
 *.tif
@@ -19,6 +21,8 @@ data/samples/*
 data/**/*.png
 data/**/*.jpg
 data/**/*.jpeg
+data/**/*.geojson
+data/**/*.csv
 
 # --- Веса ML-моделей (лежат в orevision-ml, не здесь) ---
 *.pt
