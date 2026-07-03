@@ -33,8 +33,13 @@ def run_analysis(
 ) -> AnalysisResult:
     """Полный сквозной анализ одного изображения."""
     ml = ml_client.analyze(image_path, params=params, mode=mode)
-    mask = load_mask(ml.mask_path)
-    m = metrics_mod.compute_metrics(mask, ml)
+    max_side = max(ml.image_size.get("width", 0), ml.image_size.get("height", 0))
+    if max_side > config.MAX_DIMENSION_WARN:
+        # Панорама: считаем метрики по тайлам, не грузя всю маску в RAM.
+        m = metrics_mod.compute_metrics_from_mask_path(ml.mask_path, ml)
+    else:
+        mask = load_mask(ml.mask_path)
+        m = metrics_mod.compute_metrics(mask, ml)
     classification = clf.classify(m)
     return AnalysisResult(
         image_name=Path(image_path).name,
