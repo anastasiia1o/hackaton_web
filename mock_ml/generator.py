@@ -37,6 +37,85 @@ def _rng_for(image_path: str, seed_params: dict[str, Any] | None) -> np.random.G
     return np.random.default_rng(h)
 
 
+def _apply_talc_target(
+    mask: np.ndarray, rng, objects_raw: list[dict], target_fraction: float
+) -> float:
+    """
+    Перерисовать тальк так, чтобы его доля от ВСЕЙ площади маски была близка
+    к target_fraction (0..1). Сценарные тальковые пятна стираются и заменяются
+    пятнами, добавляемыми, пока не будет достигнута цель (или лимит попыток).
+    Возвращает фактически достигнутую долю.
+    """
+    target_fraction = float(np.clip(target_fraction, 0.0, 0.95))
+    h, w = mask.shape
+    total = mask.size
+    target_px = int(round(target_fraction * total))
+
+    objects_raw[:] = [o for o in objects_raw if o["cls"] != config.CLASS_TALC]
+    mask[mask == config.CLASS_TALC] = config.CLASS_BACKGROUND
+
+    rmax = max(10, min(h, w) // 6)
+    rmin = max(5, rmax // 2)
+    attempts = 0
+    max_attempts = 400
+    while (
+        int(np.count_nonzero(mask == config.CLASS_TALC)) < target_px
+        and attempts < max_attempts
+    ):
+        objects_raw.extend(_blob(mask, rng, config.CLASS_TALC, 1, rmin, rmax + 1))
+        attempts += 1
+
+    return _safe_div(int(np.count_nonzero(mask == config.CLASS_TALC)), total)
+
+
+def _apply_noise(mask: np.ndarray, rng, noise_level: float) -> float:
+    """
+    Имитация шума скана/грязи объектива: разбрасывает мелкие артефактные
+    вкрапления по маске. noise_level в [0, 1] — доля площади, отдаваемая под
+    вкрапления, растёт примерно линейно. Возвращает фактически добавленную
+    долю площади (для warning геологу).
+    """
+    noise_level = float(np.clip(noise_level, 0.0, 1.0))
+    if noise_level <= 0:
+        return 0.0
+    h, w = mask.shape
+    total = mask.size
+    # При noise_level=1.0 вкрапления покрывают до ~2% площади.
+    n_specks = min(int(noise_level * 0.02 * total / 6), 20000)
+    before = int(np.count_nonzero(mask == config.CLASS_ARTIFACT))
+    for _ in range(n_specks):
+        s = int(rng.integers(1, 4))
+        y = int(rng.integers(0, max(1, h - s)))
+        x = int(rng.integers(0, max(1, w - s)))
+        mask[y:y + s, x:x + s] = config.CLASS_ARTIFACT
+    after = int(np.count_nonzero(mask == config.CLASS_ARTIFACT))
+    return _safe_div(after - before, total)
+
+
+def _build_confidence_map(
+    h: int, w: int, mask: np.ndarray, rng, illumination: str
+) -> np.ndarray:
+    """Grayscale-карта уверенности; illumination="uneven" добавляет виньетку
+    (уверенность модели ниже к краям кадра — имитация плохого освещения)."""
+    conf = np.full((h, w), 235, dtype=np.uint8)
+    conf[mask == config.CLASS_FINE] = int(rng.integers(150, 210))     # тонкие спорнее
+    conf[mask == config.CLASS_ARTIFACT] = int(rng.integers(60, 110))  # артефакты
+
+    if illumination == "uneven":
+        yy, xx = np.mgrid[0:h, 0:w]
+        cy, cx = h / 2.0, w / 2.0
+        dist = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+        max_dist = float(np.sqrt(cy ** 2 + cx ** 2)) or 1.0
+        vignette = 1.0 - 0.55 * (dist / max_dist)  # 1.0 в центре -> ~0.45 по углам
+        conf = np.clip(conf.astype(np.float64) * vignette, 20, 255).astype(np.uint8)
+
+    return conf
+
+
+def _safe_div(a: float, b: float) -> float:
+    return float(a) / float(b) if b else 0.0
+
+
 def _blob(mask: np.ndarray, rng, cls: int, n: int, rmin: int, rmax: int) -> list[dict]:
     """Нарисовать n круглых "включений" класса cls и вернуть их как объекты."""
     h, w = mask.shape
@@ -75,6 +154,14 @@ def generate(
       scenario = "refractory"  -> преобладают тонкие  -> Труднообогатимая
       scenario = "ordinary"    -> преобладают обычные -> Рядовая
       scenario = "review"      -> пограничный тальк    -> Экспертная проверка
+
+    Дополнительные (необязательные) параметры сцены поверх сценария:
+      talc_fraction = 0.0..1.0  -> задать долю талька вручную (точнее сценария,
+                                    перерисовывает тальковые пятна под цель)
+      noise_level   = 0.0..1.0  -> добавить имитацию шума скана/грязи (мелкие
+                                    артефактные вкрапления, до ~2% площади)
+      illumination  = "uneven"  -> неравномерная освещённость: виньетка на
+                                    карте уверенности (ниже к краям кадра)
     """
     t0 = time.time()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -115,15 +202,36 @@ def generate(
         objects_raw += _blob(mask, rng, config.CLASS_FINE, 16, 25, 50)
         objects_raw += _blob(mask, rng, config.CLASS_TALC, 2, 15, 30)
 
+    # --- Ручная доводка сцены поверх сценария (необязательно) --------------
+    talc_fraction_param = params.get("talc_fraction")
+    if talc_fraction_param is not None:
+        achieved = _apply_talc_target(mask, rng, objects_raw, float(talc_fraction_param))
+        warnings.append(
+            f"Доля талька задана вручную через params.talc_fraction: "
+            f"цель {float(talc_fraction_param) * 100:.1f}%, достигнуто {achieved * 100:.1f}%."
+        )
+
+    noise_level = float(params.get("noise_level", 0.0) or 0.0)
+    if noise_level > 0:
+        added_fraction = _apply_noise(mask, rng, noise_level)
+        warnings.append(
+            f"Добавлен имитационный шум скана (уровень {noise_level:.2f}): "
+            f"+{added_fraction * 100:.2f}% артефактных вкраплений."
+        )
+
+    illumination = params.get("illumination", "flat")
+    if illumination == "uneven":
+        warnings.append(
+            "Неравномерное освещение кадра — уверенность модели снижена к краям панорамы."
+        )
+
     # --- Сохраняем маску PNG (значение пикселя = код класса) ---------------
     stem = Path(image_path).stem
     mask_path = out_dir / f"{stem}__mask.png"
     Image.fromarray(mask, mode="L").save(mask_path)
 
     # --- Карта уверенности (grayscale): ярче = увереннее --------------------
-    conf = np.full((h, w), 235, dtype=np.uint8)
-    conf[mask == config.CLASS_FINE] = int(rng.integers(150, 210))     # тонкие спорнее
-    conf[mask == config.CLASS_ARTIFACT] = int(rng.integers(60, 110))  # артефакты
+    conf = _build_confidence_map(h, w, mask, rng, illumination)
     conf_path = out_dir / f"{stem}__confidence.png"
     Image.fromarray(conf, mode="L").save(conf_path)
 
