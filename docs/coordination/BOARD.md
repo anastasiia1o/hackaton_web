@@ -45,6 +45,15 @@
 
 ## Интеграция / упаковка
 
-- [TODO] (A/B) Docker Compose: сайт + (позже) ML в одной сети — черновик готов
-- [TODO] (A/B) README: финальные скриншоты и видео-демо для сдачи
-- [TODO] (A/B) Проверка запуска на «чистой» машине по инструкции
+- [DONE] (A) Docker/чистая машина: пофикшены баг `.gitignore` (папки `data/*` не
+  создавались на чистом клоне), отсутствующий `pandas` в requirements.txt,
+  телеметрия Streamlit (нарушала "всё локально"), headless-режим для контейнера
+  — stream-a/docker-readme-cleanup. Секция ML в docker-compose.yml остаётся
+  TODO — появится, когда `orevision-ml` даст образ.
+- [TODO] (A/B) README: финальные скриншоты и видео-демо для сдачи (руками, не
+  автоматизировано)
+- [DONE] (A) Проверка запуска на «чистой» машине: свежий venv + `pip install -r
+  requirements.txt` + `pytest` + поднятие `streamlit run app.py` (все страницы
+  отвечают 200) — проверено без Docker (Docker Desktop недоступен в среде
+  агента); сам `docker build`/`docker compose up` руками не гонялся, статически
+  вычитан

@@ -1,0 +1,7 @@
+# Локальная конфигурация Streamlit для OreVision.
+#
+# gatherUsageStats=false отключает отправку анонимной телеметрии на серверы
+# Streamlit. Без этого утверждение из README "всё локально, данные не уходят
+# в интернет" было бы неточным по умолчанию.
+[browser]
+gatherUsageStats = false
