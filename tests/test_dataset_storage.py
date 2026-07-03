@@ -137,6 +137,22 @@ def test_save_annotation_rejects_wrong_size(tmp_path):
         ds.save_annotation("ds1", image_id, region_id, mask=bad_mask)
 
 
+def test_get_or_create_whole_image_roi_is_idempotent(tmp_path):
+    img_path = tmp_path / "pano.png"
+    Image.new("RGB", (200, 150)).save(img_path)
+    row = ds.register_image("ds1", filename="pano.png", source="manual_path", source_path=str(img_path))
+    image_id = row["image_id"]
+    disp = Image.new("RGB", (200, 150), (9, 9, 9))
+
+    roi1 = ds.get_or_create_whole_image_roi("ds1", image_id, disp)
+    assert roi1["kind"] == "whole_image"
+    assert (roi1["x"], roi1["y"], roi1["width"], roi1["height"]) == (0, 0, 200, 150)
+
+    roi2 = ds.get_or_create_whole_image_roi("ds1", image_id, disp)
+    assert roi2["region_id"] == roi1["region_id"]  # переиспользован, не создан заново
+    assert len(ds.list_rois("ds1", image_id)) == 1
+
+
 def test_export_active_learning_filters_by_status(tmp_path):
     image_id, region_id = _setup_roi(tmp_path)
     mask = np.zeros((40, 50), dtype=np.uint8)

@@ -260,10 +260,15 @@ def create_roi(
     x: int, y: int, width: int, height: int,
     source_image_width: int, source_image_height: int,
     roi_image: Image.Image,
+    extra: Optional[dict] = None,
 ) -> dict:
     """
     Создать новый сохранённый ROI: координаты относительно оригинала + копия
     пикселей участка (roi_image.png) + пустая (неразмеченная) стартовая маска.
+
+    extra — необязательные дополнительные поля в roi.json (например,
+    {"kind": "whole_image"} для страницы «Разметка эксперта», где ROI покрывает
+    весь показанный кадр целиком, а не вырезанный пользователем прямоугольник).
     """
     region_id = _next_region_id(dataset_id, image_id)
     rdir = region_dir(dataset_id, image_id, region_id)
@@ -290,6 +295,7 @@ def create_roi(
         "updated_at": now,
         "status": ac.STATUS_DRAFT,
         "revision": 0,
+        **(extra or {}),
     }
     (rdir / "roi.json").write_text(json.dumps(roi, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -302,6 +308,29 @@ def create_roi(
         json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return roi
+
+
+def get_or_create_whole_image_roi(
+    dataset_id: str, image_id: str, display_image: Image.Image,
+) -> dict:
+    """
+    Вернуть (создав при необходимости) единственный ROI, покрывающий весь
+    показанный кадр целиком — используется страницей «Разметка эксперта»,
+    где эксперт размечает изображение напрямую, без отдельного шага
+    вырезания прямоугольного участка. Кадр — уже уменьшенное для показа
+    изображение (как и весь остальной UI, гигапиксельные панорамы целиком в
+    память не грузим); source_image_width/height здесь равны размеру ИМЕННО
+    этого кадра, т.к. это и есть пиксельная сетка, которую эксперт размечает.
+    """
+    for r in list_rois(dataset_id, image_id):
+        if r.get("kind") == "whole_image":
+            return r
+    return create_roi(
+        dataset_id, image_id,
+        x=0, y=0, width=display_image.width, height=display_image.height,
+        source_image_width=display_image.width, source_image_height=display_image.height,
+        roi_image=display_image, extra={"kind": "whole_image"},
+    )
 
 
 def list_rois(dataset_id: str, image_id: str) -> list[dict]:
