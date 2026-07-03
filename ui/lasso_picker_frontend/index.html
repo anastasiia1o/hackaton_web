@@ -1,0 +1,197 @@
+<!doctype html>
+<!--
+  OreVision — свободное выделение (лассо) произвольной ЗАМКНУТОЙ ЛИНИИ мышью,
+  вместо перетаскиваемого прямоугольника (ui/region_picker_frontend).
+
+  Dependency-free vanilla-JS Streamlit-компонент (тот же ручной протокол:
+  streamlit:componentReady / setFrameHeight / setComponentValue исходящие,
+  streamlit:render входящее). Рисуем SVG-путь по точкам, которые накапливаем
+  во время перетаскивания (pointerdown -> pointermove -> pointerup).
+
+  Поддерживает необязательный список УЖЕ подтверждённых фигур ("committed") —
+  они рисуются как статичные подписанные контуры поверх изображения, а поверх
+  них — текущая (ещё не подтверждённая) линия. Это позволяет использовать один
+  и тот же компонент и для одиночного выделения (инспектор/экспертная
+  проверка), и для накопления нескольких подписанных участков (разметка
+  эксперта).
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #wrap { position: relative; width: 100%; line-height: 0; }
+  #img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; border-radius: 6px; }
+  #svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #stage { position: absolute; inset: 0; touch-action: none; cursor: crosshair; }
+  .committed-label {
+    font: 13px system-ui, sans-serif; paint-order: stroke; stroke: #000;
+    stroke-width: 3px; fill: #fff; pointer-events: none;
+  }
+  #hint {
+    position: absolute; left: 6px; bottom: 6px; z-index: 5; pointer-events: none;
+    background: rgba(20, 22, 28, .72); color: #d5d8de; border-radius: 5px;
+    padding: 2px 8px; font: 11px system-ui, sans-serif;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <img id="img" draggable="false" alt="" />
+  <svg id="svg"></svg>
+  <div id="stage"></div>
+  <div id="hint">Обведите область мышью — замкнутая линия (отпустите, чтобы завершить)</div>
+</div>
+<script>
+(function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  var img = document.getElementById('img');
+  var svg = document.getElementById('svg');
+  var stage = document.getElementById('stage');
+
+  var W = 1, H = 1;
+  var lastSrc = null;
+  var drawing = false;
+  var current = [];           // точки текущей (незавершённой) линии, в пикселях изображения
+  var committedRaw = [];      // как пришло из Python (точки в долях 0..1)
+  var color = 'rgba(255, 207, 51, .30)';
+  var borderColor = '#ffcf33';
+  var minStepPx = 4;          // минимальный шаг между точками (в пикселях изображения)
+
+  function post(msg) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), '*'); }
+  function setHeight() { post({ type: 'streamlit:setFrameHeight', height: document.documentElement.scrollHeight || 10 }); }
+  function round4(v) { return Math.round(v * 10000) / 10000; }
+
+  function ptImg(e) {
+    var r = stage.getBoundingClientRect();
+    var w = r.width || 1, h = r.height || 1;
+    var x = Math.max(0, Math.min(W, (e.clientX - r.left) / w * W));
+    var y = Math.max(0, Math.min(H, (e.clientY - r.top) / h * H));
+    return [x, y];
+  }
+
+  function pathD(points) {
+    if (!points.length) return '';
+    var d = 'M ' + points[0][0].toFixed(1) + ' ' + points[0][1].toFixed(1);
+    for (var i = 1; i < points.length; i++) d += ' L ' + points[i][0].toFixed(1) + ' ' + points[i][1].toFixed(1);
+    return d + ' Z';
+  }
+
+  function centroid(points) {
+    var sx = 0, sy = 0;
+    points.forEach(function (p) { sx += p[0]; sy += p[1]; });
+    return [sx / points.length, sy / points.length];
+  }
+
+  function render() {
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    svg.innerHTML = '';
+
+    committedRaw.forEach(function (s) {
+      var pts = (s.points || []).map(function (p) { return [p[0] * W, p[1] * H]; });
+      if (pts.length < 3) return;
+      var path = document.createElementNS(NS, 'path');
+      path.setAttribute('d', pathD(pts));
+      path.setAttribute('fill', s.color || 'rgba(60, 160, 255, .30)');
+      path.setAttribute('stroke', s.border_color || '#3aa0ff');
+      path.setAttribute('stroke-width', Math.max(1, W / 400));
+      svg.appendChild(path);
+      if (s.label) {
+        var c = centroid(pts);
+        var text = document.createElementNS(NS, 'text');
+        text.setAttribute('x', c[0]); text.setAttribute('y', c[1]);
+        text.setAttribute('class', 'committed-label');
+        text.setAttribute('text-anchor', 'middle');
+        text.textContent = s.label;
+        svg.appendChild(text);
+      }
+    });
+
+    if (current.length > 1) {
+      var cp = document.createElementNS(NS, 'path');
+      cp.setAttribute('d', pathD(current));
+      cp.setAttribute('fill', color);
+      cp.setAttribute('stroke', borderColor);
+      cp.setAttribute('stroke-width', Math.max(1, W / 300));
+      cp.setAttribute('stroke-dasharray', Math.max(3, W / 150));
+      svg.appendChild(cp);
+    }
+  }
+
+  function sendValue() {
+    if (current.length < 3) return;
+    var xs = current.map(function (p) { return p[0] / W; });
+    var ys = current.map(function (p) { return p[1] / H; });
+    post({
+      type: 'streamlit:setComponentValue',
+      value: {
+        points: current.map(function (p) { return [round4(p[0] / W), round4(p[1] / H)]; }),
+        bbox: [
+          round4(Math.min.apply(null, xs)), round4(Math.min.apply(null, ys)),
+          round4(Math.max.apply(null, xs)), round4(Math.max.apply(null, ys)),
+        ],
+        nonce: Date.now(),
+      },
+    });
+  }
+
+  stage.addEventListener('pointerdown', function (e) {
+    drawing = true;
+    current = [ptImg(e)];
+    stage.setPointerCapture(e.pointerId);
+    render();
+    e.preventDefault();
+  });
+  stage.addEventListener('pointermove', function (e) {
+    if (!drawing) return;
+    var p = ptImg(e);
+    var last = current[current.length - 1];
+    if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= minStepPx) {
+      current.push(p);
+      render();
+    }
+  });
+  function endDraw() {
+    if (!drawing) return;
+    drawing = false;
+    if (current.length < 3) { current = []; render(); return; }
+    render();
+    sendValue();
+  }
+  stage.addEventListener('pointerup', endDraw);
+  stage.addEventListener('pointercancel', endDraw);
+  stage.addEventListener('pointerleave', function (e) { if (drawing && e.buttons === 0) endDraw(); });
+
+  function applyArgs(args) {
+    args = args || {};
+    if (args.color) color = args.color;
+    if (args.border_color) borderColor = args.border_color;
+    committedRaw = args.committed || [];
+
+    var srcChanged = args.src && args.src !== lastSrc;
+    if (srcChanged) {
+      lastSrc = args.src;
+      img.src = args.src;
+      current = [];
+    }
+    W = args.width || W;
+    H = args.height || H;
+    render();
+  }
+
+  window.addEventListener('message', function (event) {
+    var d = event.data;
+    if (!d || d.type !== 'streamlit:render') return;
+    applyArgs(d.args);
+    setHeight();
+  });
+
+  img.addEventListener('load', function () { render(); setHeight(); });
+  window.addEventListener('resize', function () { render(); setHeight(); });
+
+  post({ type: 'streamlit:componentReady', apiVersion: 1 });
+  setHeight();
+})();
+</script>
+</body>
+</html>

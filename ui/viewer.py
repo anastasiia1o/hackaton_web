@@ -444,3 +444,53 @@ def region_picker(
     if x1 <= x0 or y1 <= y0:
         return bbox
     return (x0, y0, x1, y1)
+
+
+# --- Свободное выделение (лассо) замкнутой линией мышью ----------------------
+# Тот же dependency-free подход (vanilla JS, ручной протокол Streamlit
+# Components), что и region_picker выше — но вместо прямоугольника с
+# уголками/краями геолог обводит произвольную замкнутую область мышью.
+_LASSO_PICKER_DIR = Path(__file__).resolve().parent / "lasso_picker_frontend"
+_lasso_picker_component = components.declare_component(
+    "orevision_lasso_picker", path=str(_LASSO_PICKER_DIR)
+)
+
+
+def lasso_picker(
+    image: Image.Image,
+    key: str,
+    committed: list[dict] | None = None,
+    color: str = "rgba(255, 207, 51, .30)",
+    border_color: str = "#ffcf33",
+) -> Optional[dict]:
+    """
+    Свободное выделение (лассо): обвести произвольную ЗАМКНУТУЮ область мышью
+    (не прямоугольник). Возвращает последнюю проведённую линию:
+        {"points": [[xf, yf], ...], "bbox": (x0f, y0f, x1f, y1f)}
+    координаты — в долях 0..1 от изображения (как у region_picker, поэтому
+    домножение на исходные width/height даёт точные пиксели оригинала).
+    Возвращает None, пока геолог ничего не обвёл (линия из <3 точек не считается).
+
+    committed — уже подтверждённые фигуры, рисуются поверх изображения как
+    статичные подписанные контуры: [{"points": [[xf,yf],...], "label": str,
+    "color": "rgba(...)", "border_color": "#hex"}]. Нужны для страницы
+    «Разметка эксперта», где на одном изображении копится несколько подписанных
+    участков; для одиночного выделения (инспектор/экспертная проверка) просто
+    не передавайте этот параметр.
+    """
+    src = _to_data_uri(image)
+    value = _lasso_picker_component(
+        src=src,
+        width=image.width, height=image.height,
+        committed=committed or [],
+        color=color, border_color=border_color,
+        key=key, default=None,
+    )
+    if not isinstance(value, dict) or not value.get("points") or len(value["points"]) < 3:
+        return None
+    try:
+        pts = [(float(x), float(y)) for x, y in value["points"]]
+        bbox = tuple(float(v) for v in value["bbox"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"points": pts, "bbox": bbox}
