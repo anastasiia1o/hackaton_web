@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw
 
 from src import annotation_config as ac
 from src import config, dataset_export as de, dataset_storage as ds, event_log as ev
-from ui import viewer
+from ui import file_pickers, viewer
 
 st.set_page_config(page_title="OreVision — Разметка эксперта", page_icon="🖌️", layout="wide")
 config.ensure_dirs()
@@ -48,36 +48,79 @@ st.markdown(legend_html, unsafe_allow_html=True)
 dataset_id = st.text_input("ID датасета", value=st.session_state.get("dataset_id", "default"))
 st.session_state["dataset_id"] = dataset_id
 
+def _register_and_report(filename: str, *, source: str, file_bytes: bytes | None = None,
+                          source_path: str | None = None) -> bool:
+    row = ds.register_image(
+        dataset_id, filename=filename, source=source, file_bytes=file_bytes, source_path=source_path,
+    )
+    ev.log_import(dataset_id, f"al_register_{source}", filename=filename, valid=row["valid"])
+    if row["valid"]:
+        st.success(f"Зарегистрировано: {filename}")
+    else:
+        st.error(f"«{filename}»: не удалось прочитать изображение — {row['validation_error']}")
+    return row["valid"]
+
+
 with st.expander("➕ Добавить новый шлиф/панораму в этот датасет"):
     add_tab_path, add_tab_upload = st.tabs(["Путь к файлу", "Загрузить файл"])
+
     with add_tab_path:
-        p_str = st.text_input("Путь к изображению", key="al_add_path")
+        st.caption("Впишите путь вручную или нажмите на иконку, чтобы выбрать файл(ы) через проводник.")
+        path_col, browse_col = st.columns([5, 1])
+        with path_col:
+            p_str = st.text_input(
+                "Путь к изображению", key="al_add_path", label_visibility="collapsed",
+                placeholder=r"Например: D:\data\slide_01.jpg",
+            )
+        with browse_col:
+            browsed = file_pickers.folder_or_files_picker(key="al_browse_path", mode="files", label="📂")
         if st.button("Зарегистрировать по пути", key="al_add_path_btn") and p_str.strip():
             p = Path(p_str.strip())
             if not p.is_file():
                 st.error(f"Файл не найден: {p}")
             else:
-                row = ds.register_image(dataset_id, filename=p.name, source="manual_path", source_path=str(p))
-                ev.log_import(dataset_id, "al_register_path", filename=p.name, valid=row["valid"])
-                if row["valid"]:
-                    st.success(f"Зарегистрировано: {p.name}")
+                if _register_and_report(p.name, source="manual_path", source_path=str(p)):
                     st.rerun()
-                else:
-                    st.error(f"Не удалось прочитать изображение: {row['validation_error']}")
-    with add_tab_upload:
-        up = st.file_uploader(
-            "Изображение шлифа/панорамы", type=[e.lstrip(".") for e in config.SUPPORTED_FORMATS],
-            key="al_upload",
-        )
-        if up is not None and st.button("Зарегистрировать загруженный файл", key="al_upload_btn"):
-            data = up.getvalue()
-            row = ds.register_image(dataset_id, filename=up.name, source="file_picker", file_bytes=data)
-            ev.log_import(dataset_id, "al_register_upload", filename=up.name, valid=row["valid"])
-            if row["valid"]:
-                st.success(f"Зарегистрировано: {up.name}")
+        if browsed and browsed.get("nonce") != st.session_state.get("_al_browse_nonce"):
+            st.session_state["_al_browse_nonce"] = browsed.get("nonce")
+            any_ok = False
+            for name, data in file_pickers.decode_picked_files(browsed):
+                any_ok = _register_and_report(name, source="file_picker", file_bytes=data) or any_ok
+            if any_ok:
                 st.rerun()
-            else:
-                st.error(f"Не удалось прочитать изображение: {row['validation_error']}")
+
+    with add_tab_upload:
+        ups = st.file_uploader(
+            "Изображение шлифа/панорамы", type=[e.lstrip(".") for e in config.SUPPORTED_FORMATS],
+            key="al_upload", accept_multiple_files=True,
+        )
+        if ups and st.button("Зарегистрировать загруженные файлы", key="al_upload_btn"):
+            any_ok = False
+            for up in ups:
+                any_ok = _register_and_report(up.name, source="file_picker", file_bytes=up.getvalue()) or any_ok
+            if any_ok:
+                st.rerun()
+
+with st.expander("🗑️ Удалить шлиф/панораму из датасета"):
+    all_images = ds.list_images(dataset_id)
+    if not all_images:
+        st.caption("В датасете пока нет изображений.")
+    else:
+        del_labels = {im["image_id"]: f"{im['original_filename']} ({im['image_id']})" for im in all_images}
+        to_delete = st.multiselect(
+            "Выбрать для удаления", options=list(del_labels.keys()), format_func=lambda i: del_labels[i],
+        )
+        st.caption(
+            "Убирает изображение(-я) из списка (и удаляет управляемую копию, если она "
+            "была загружена через проводник). Файл, добавленный по пути, никогда не "
+            "трогается. Уже сохранённые ROI и разметка не удаляются."
+        )
+        if st.button("🗑️ Удалить выбранные", disabled=not to_delete):
+            for iid in to_delete:
+                result = ds.remove_image(dataset_id, iid)
+                ev.log_import(dataset_id, "al_remove_image", **result)
+            st.success(f"Удалено из списка: {len(to_delete)}.")
+            st.rerun()
 
 images = [im for im in ds.list_images(dataset_id) if im.get("valid")]
 if not images:
