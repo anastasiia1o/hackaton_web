@@ -230,6 +230,40 @@ def resolve_image_path(dataset_id: str, image_id: str) -> Optional[Path]:
     return None
 
 
+def remove_image(dataset_id: str, image_id: str) -> dict:
+    """
+    Убрать изображение из реестра датасета (manifest.jsonl).
+
+    Если изображение было загружено через проводник (есть управляемая копия
+    в images/) — копия удаляется. Если это ссылка на путь ("путь к файлу") —
+    ИСХОДНЫЙ файл пользователя НИКОГДА не трогаем, убираем только запись.
+
+    Ранее сохранённые ROI/разметка (annotations/<image_id>/) НЕ удаляются —
+    принятая для обучения разметка не должна теряться из-за того, что
+    изображение убрали из списка (она просто перестаёт быть на виду в
+    выпадающем списке, но остаётся на диске и в экспортах).
+    """
+    rows = list_images(dataset_id)
+    target = next((r for r in rows if r["image_id"] == image_id), None)
+    if target is None:
+        return {"removed": False, "image_id": image_id}
+
+    remaining = [r for r in rows if r["image_id"] != image_id]
+    with open(manifest_path(dataset_id), "w", encoding="utf-8") as f:
+        for r in remaining:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    deleted_file = False
+    stored = target.get("stored_path")
+    if stored:
+        p = Path(stored)
+        if p.exists():
+            p.unlink()
+            deleted_file = True
+
+    return {"removed": True, "image_id": image_id, "deleted_file": deleted_file}
+
+
 def save_image_meta(dataset_id: str, image_id: str, meta: dict) -> Path:
     p = image_annotations_dir(dataset_id, image_id) / "image_meta.json"
     p.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

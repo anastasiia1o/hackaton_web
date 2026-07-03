@@ -61,6 +61,47 @@ def test_list_images_dedupes_by_id(tmp_path):
     assert len(images) == 1
 
 
+def test_remove_image_manual_path_keeps_original_file(tmp_path):
+    img_path = tmp_path / "keep_me.png"
+    Image.new("RGB", (20, 20)).save(img_path)
+    row = ds.register_image("ds1", filename="keep_me.png", source="manual_path", source_path=str(img_path))
+
+    result = ds.remove_image("ds1", row["image_id"])
+    assert result == {"removed": True, "image_id": row["image_id"], "deleted_file": False}
+    assert ds.list_images("ds1") == []
+    assert img_path.exists()  # исходный файл пользователя никогда не трогаем
+
+
+def test_remove_image_picker_deletes_stored_copy(tmp_path):
+    src = tmp_path / "src.png"
+    Image.new("RGB", (20, 20)).save(src)
+    row = ds.register_image("ds1", filename="picked.png", source="file_picker", file_bytes=src.read_bytes())
+    stored = ds.resolve_image_path("ds1", row["image_id"])
+    assert stored.exists()
+
+    result = ds.remove_image("ds1", row["image_id"])
+    assert result["deleted_file"] is True
+    assert not stored.exists()
+    assert ds.list_images("ds1") == []
+
+
+def test_remove_image_unknown_id_returns_removed_false(tmp_path):
+    result = ds.remove_image("ds1", "does_not_exist")
+    assert result == {"removed": False, "image_id": "does_not_exist"}
+
+
+def test_remove_image_keeps_other_images(tmp_path):
+    p1, p2 = tmp_path / "a.png", tmp_path / "b.png"
+    Image.new("RGB", (10, 10)).save(p1)
+    Image.new("RGB", (10, 10)).save(p2)
+    r1 = ds.register_image("ds1", filename="a.png", source="manual_path", source_path=str(p1))
+    r2 = ds.register_image("ds1", filename="b.png", source="manual_path", source_path=str(p2))
+
+    ds.remove_image("ds1", r1["image_id"])
+    remaining_ids = [im["image_id"] for im in ds.list_images("ds1")]
+    assert remaining_ids == [r2["image_id"]]
+
+
 def test_create_roi_and_list(tmp_path):
     img_path = tmp_path / "pano.png"
     Image.new("RGB", (500, 400), (5, 5, 5)).save(img_path)
