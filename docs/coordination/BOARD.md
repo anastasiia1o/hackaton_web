@@ -27,6 +27,11 @@
 - [TODO] (A) Реальный режим: проверить `_analyze_real` против настоящего ML (когда поднимут :8001)
 - [DONE] (A) Тайловый расчёт метрик для панорам >10000px (агрегация по тайлам) — stream-a/tiled-metrics
 - [DONE] (A) Обогатить mock-генератор: регулируемый % талька, шум, неравномерное освещение — stream-a/mock-generator-enrich
+- [DONE] (A) Второй вариант экспорта «как S2_v2» (imgs/masks/masks_colored/
+  masks_human, `src/dataset_export.py`, 13 тестов) на главной/batch/AL-
+  странице + фикс зависающих кнопок экспорта на главной странице (sticky
+  demo-режим, кэш `run_analysis`, PDF в одну кнопку, batch/AL-результаты
+  вынесены в session_state) — stream-a/annotation-suite
 
 ## Поток B — UI & Viewer
 
