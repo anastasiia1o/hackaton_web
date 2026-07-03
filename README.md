@@ -93,8 +93,11 @@ orevision-app/
 ├── app.py                  # Streamlit: главный экран (поток B)
 ├── batch_process.py        # пакетная обработка серии изображений (CLI)
 ├── pages/                  # многостраничность Streamlit (поток B)
-│   ├── 1_Пакетная_обработка.py
-│   └── 2_История_и_лог.py
+│   ├── 1_Пакетная_обработка.py            # очередь импорта (путь/папка/файлы) + batch
+│   ├── 2_История_и_лог.py                 # журнал ML-анализов
+│   ├── 3_Инспектор_панорамы.py            # pan/zoom/ROI на больших панорамах
+│   ├── 4_Активное_обучение_Разметка_эксперта.py  # редактор масок (active learning)
+│   └── 5_Логи.py                          # события импорта/batch/ошибок/разметки + очистка
 ├── API_CONTRACT.md         # договор с ML-сервисом
 ├── AGENTS.md               # как работают два агента в одном репо
 ├── requirements.txt
@@ -110,10 +113,18 @@ orevision-app/
 │   ├── pipeline.py         # склейка ML→метрики→классификация
 │   ├── reports.py          # экспорт CSV/JSON/PDF + run_manifest.json
 │   ├── gis_export.py       # экспорт GeoJSON/Shapefile
-│   └── storage.py          # локальное хранение, экспертные коррекции
+│   ├── storage.py          # локальное хранение, экспертные коррекции
+│   ├── batch_import.py     # очередь импорта: скан папки/проба файла (формат/размер/валидность)
+│   ├── dataset_storage.py  # датасеты/ROI/маски/ревизии/экспорт для active learning
+│   ├── annotation_config.py# конфигурируемые классы разметки (configs/annotation_classes.json)
+│   └── event_log.py        # data/logs/*.jsonl + безопасная очистка
+├── configs/
+│   └── annotation_classes.json   # классы разметки: id/имя/русское название/цвет
 ├── ui/                     # ИНТЕРФЕЙС (поток B)
 │   ├── viewer.py           # overlay масок, zoom/pan, слои, инспектор участка
-│   └── components.py        # карточки, таблицы, легенда
+│   ├── components.py        # карточки, таблицы, легенда
+│   ├── file_pickers.py + folder_picker_frontend/       # выбор папки/файлов (проводник)
+│   └── annotation_editor.py + annotation_editor_frontend/  # canvas-редактор масок
 ├── mock_ml/                # локальная имитация ML по контракту
 │   └── generator.py
 ├── tests/                  # тесты логики (pytest)
@@ -123,6 +134,8 @@ orevision-app/
 │   └── coordination/       # BOARD / HANDOFF / планы потоков
 └── data/                   # ЛОКАЛЬНЫЕ данные (содержимое в Git НЕ попадает,
     ├── uploads/  results/  samples/    # сами папки — да, через .gitkeep)
+    ├── datasets/           # active learning: см. раздел 7 ниже
+    └── logs/               # app_events.jsonl / batch_events.jsonl
 ```
 
 ---
@@ -148,6 +161,54 @@ orevision-app/
 
 **Большие/секретные файлы:** держим в локальной `data/` (вне Git). Для обмена
 образцами — облачный диск или Git LFS, но не обычный commit.
+
+---
+
+## 6a. Хранилище датасетов и разметки (active learning)
+
+Три новых страницы («Пакетная обработка» с очередью импорта, «Инспектор
+панорамы», «Активное обучение / Разметка эксперта») используют общий
+формат хранения на диске (`src/dataset_storage.py`):
+
+```
+data/datasets/<dataset_id>/
+  images/<image_id>.<ext>            — управляемая КОПИЯ исходника (picker-источники;
+                                        для "путь к папке" копии нет — храним ссылку,
+                                        исходный файл никогда не изменяется)
+  manifest.jsonl                     — реестр изображений (формат/размер/разрешение/
+                                        источник/валидность)
+  annotations/<image_id>/
+    image_meta.json
+    regions/<region_id>/
+      roi.json                — x, y, width, height ОТНОСИТЕЛЬНО исходной панорамы
+                                 + coordinate_system + created_at + статус + ревизия
+      roi_image.png            — вырезанный участок (копия пикселей, lossless)
+      semantic_mask.png        — 8-bit ОДНОКАНАЛЬНАЯ PNG, значение пикселя = id класса;
+                                  размеры точно равны roi_image.png
+      annotation_state.json    — status, revision, updated_at, author, class_pixel_counts
+      shapes.geojson           — многоугольники (если использовался Polygon-инструмент)
+      revisions/rev_NNNN_.../   — снимок ПРЕДЫДУЩЕЙ маски+состояния перед КАЖДЫМ
+                                   явным сохранением (принятая разметка не теряется)
+  exports/active_learning/<export_id>/
+    images/<sample_id>.png  masks/<sample_id>.png
+    manifest.csv  manifest.jsonl  classes.json
+
+data/logs/
+  app_events.jsonl     — импорт, ошибки, сохранения разметки, экспорт
+  batch_events.jsonl   — старт/прогресс/завершение пакетной обработки
+```
+
+Классы разметки — **не хардкод**, а `configs/annotation_classes.json`
+(id, машинное имя, русское название, цвет). По умолчанию: тальк (синий),
+обычные срастания (зелёный), тонкие срастания (красный), неопределённая
+область (жёлто-оранжевый), неразмеченная область (прозрачный).
+
+Статусы разметки: `draft` → `reviewed` → `accepted_for_training` /
+`needs_expert_review`. Экспорт для дообучения (кнопка «📦 Экспортировать
+подтверждённые разметки») берёт **только** `accepted_for_training`.
+
+Ничего из `data/` (включая `data/datasets` и `data/logs`) в Git не попадает —
+см. `.gitignore`.
 
 ---
 
