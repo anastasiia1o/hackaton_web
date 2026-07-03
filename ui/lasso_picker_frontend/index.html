@@ -40,7 +40,7 @@
   <img id="img" draggable="false" alt="" />
   <svg id="svg"></svg>
   <div id="stage"></div>
-  <div id="hint">Обведите область мышью — замкнутая линия (отпустите, чтобы завершить)</div>
+  <div id="hint">Обведите область мышью (отпустите — завершить) · ПКМ — отменить выделение</div>
 </div>
 <script>
 (function () {
@@ -161,6 +161,21 @@
   stage.addEventListener('pointerup', endDraw);
   stage.addEventListener('pointercancel', endDraw);
   stage.addEventListener('pointerleave', function (e) { if (drawing && e.buttons === 0) endDraw(); });
+
+  // Правая кнопка мыши — отменить текущее выделение (если ошиблись), не
+  // открывая системное контекстное меню браузера. Отменяет и незавершённое
+  // перетаскивание, и уже завершённую (но ещё не использованную) линию —
+  // во втором случае явно сообщаем Python, что выделения больше нет.
+  stage.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    var hadSomething = current.length > 0;
+    current = [];
+    drawing = false;
+    render();
+    if (hadSomething) {
+      post({ type: 'streamlit:setComponentValue', value: null });
+    }
+  });
 
   function applyArgs(args) {
     args = args || {};

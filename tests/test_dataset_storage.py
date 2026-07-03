@@ -213,6 +213,9 @@ def test_export_active_learning_filters_by_status(tmp_path):
 
     result = ds.export_active_learning("ds1")
     assert result["num_samples"] == 1  # только accepted_for_training
+    # Понятное имя (датасет + метка + дата), а не голый набор цифр.
+    assert result["export_id"].startswith("ds1_")
+    assert "разметка" in result["export_id"]
 
     export_dir = tmp_path / "datasets" / "ds1" / "exports" / "active_learning" / result["export_id"]
     assert (export_dir / "classes.json").exists()
@@ -244,3 +247,32 @@ def test_export_active_learning_s2_style_writes_imgs_masks_layout(tmp_path):
     assert list(edir.glob("masks_colored/*.png"))
     assert list(edir.glob("masks_human/*.jpg"))
     assert result["export_id"] in ds.list_exports_s2_style("ds1")
+
+
+def test_count_regions_by_status(tmp_path):
+    img_path = tmp_path / "pano.png"
+    Image.new("RGB", (300, 200)).save(img_path)
+    row = ds.register_image("ds1", filename="pano.png", source="manual_path", source_path=str(img_path))
+    image_id = row["image_id"]
+
+    roi_a = ds.create_roi(
+        "ds1", image_id, x=0, y=0, width=10, height=10,
+        source_image_width=300, source_image_height=200, roi_image=Image.new("RGB", (10, 10)),
+    )
+    roi_b = ds.create_roi(
+        "ds1", image_id, x=20, y=0, width=10, height=10,
+        source_image_width=300, source_image_height=200, roi_image=Image.new("RGB", (10, 10)),
+    )
+    assert ds.count_regions_by_status("ds1") == 0  # оба ещё draft
+
+    ds.save_annotation("ds1", image_id, roi_a["region_id"],
+                        mask=np.zeros((10, 10), dtype=np.uint8), status=ac.STATUS_ACCEPTED)
+    assert ds.count_regions_by_status("ds1") == 1
+
+    ds.save_annotation("ds1", image_id, roi_b["region_id"],
+                        mask=np.zeros((10, 10), dtype=np.uint8), status=ac.STATUS_ACCEPTED)
+    assert ds.count_regions_by_status("ds1") == 2
+
+    ds.save_annotation("ds1", image_id, roi_a["region_id"],
+                        mask=np.zeros((10, 10), dtype=np.uint8), status=ac.STATUS_NEEDS_REVIEW)
+    assert ds.count_regions_by_status("ds1") == 1

@@ -118,6 +118,16 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _friendly_export_id(dataset_id: str, suffix: str = "") -> str:
+    """
+    Понятное имя экспорта: <датасет>_<разметка|разметка-s2v2>_<дата>_<время>,
+    а не голый набор цифр — чтобы в списке скачанных файлов сразу было видно,
+    что это и из какого датасета, а не "export_20260703T153000.zip".
+    """
+    tag = f"_{suffix}" if suffix else ""
+    return f"{_slugify(dataset_id)}{tag}_{time.strftime('%Y-%m-%d_%H%M')}"
+
+
 # --------------------------------------------------------------------------- #
 # Регистрация изображений (manifest.jsonl)
 # --------------------------------------------------------------------------- #
@@ -538,7 +548,7 @@ def export_active_learning(
     `statuses` (по умолчанию — только accepted_for_training) + manifest.csv,
     manifest.jsonl, classes.json.
     """
-    export_id = export_id or f"export_{time.strftime('%Y%m%dT%H%M%S')}"
+    export_id = export_id or _friendly_export_id(dataset_id, "разметка")
     edir = exports_root(dataset_id) / export_id
     (edir / "images").mkdir(parents=True, exist_ok=True)
     (edir / "masks").mkdir(parents=True, exist_ok=True)
@@ -635,7 +645,7 @@ def export_active_learning_s2_style(
     """
     from . import dataset_export as de
 
-    export_id = export_id or f"export_{time.strftime('%Y%m%dT%H%M%S')}"
+    export_id = export_id or _friendly_export_id(dataset_id, "разметка-s2v2")
     edir = dataset_dir(dataset_id) / "exports" / "active_learning_s2v2" / export_id
 
     class_colors = {c.id: c.color for c in ac.load_classes()}
@@ -680,3 +690,25 @@ def list_exports_s2_style(dataset_id: str) -> list[str]:
     if not root.exists():
         return []
     return sorted(p.name for p in root.iterdir() if p.is_dir())
+
+
+def count_regions_by_status(
+    dataset_id: str, statuses: tuple[str, ...] = ac.EXPORTABLE_STATUSES,
+) -> int:
+    """
+    Сколько ROI по всему датасету сейчас подходят под экспорт (без сборки
+    файлов) — чтобы UI мог честно показать "что скачается" ДО клика на
+    экспорт, без отдельного шага выбора статуса вручную (он всегда один и
+    тот же — accepted_for_training по умолчанию).
+    """
+    count = 0
+    ann_root = annotations_dir(dataset_id)
+    if not ann_root.exists():
+        return 0
+    for image_dir in ann_root.iterdir():
+        if not image_dir.is_dir():
+            continue
+        for roi in list_rois(dataset_id, image_dir.name):
+            if roi.get("status") in statuses:
+                count += 1
+    return count
