@@ -11,8 +11,6 @@
 
 from __future__ import annotations
 
-import shutil
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -21,7 +19,7 @@ import streamlit as st
 from PIL import Image, ImageDraw
 
 from src import annotation_config as ac
-from src import config, dataset_storage as ds, event_log as ev
+from src import config, dataset_export as de, dataset_storage as ds, event_log as ev
 from ui import viewer
 
 st.set_page_config(page_title="OreVision — Разметка эксперта", page_icon="🖌️", layout="wide")
@@ -252,22 +250,48 @@ st.caption(
     "В экспорт попадают ТОЛЬКО разметки со статусом «Принято для обучения» "
     "(accepted_for_training)."
 )
+export_format = st.radio(
+    "Вариант сохранения",
+    options=["classic", "s2_v2"],
+    format_func=lambda f: (
+        "Классический (images/ masks/ manifest.csv/.jsonl/classes.json)"
+        if f == "classic" else
+        "Как S2_v2 (imgs/ masks/ masks_colored/ masks_human/)"
+    ),
+    horizontal=True,
+)
+
 if st.button("📦 Экспортировать подтверждённые разметки для дообучения"):
-    result = ds.export_active_learning(dataset_id)
-    ev.log_export(dataset_id, result["export_id"], result["num_samples"])
-    if result["num_samples"] == 0:
+    if export_format == "classic":
+        result = ds.export_active_learning(dataset_id)
+        count = result["num_samples"]
+    else:
+        result = ds.export_active_learning_s2_style(dataset_id)
+        count = result["num_items"]
+    ev.log_export(dataset_id, result["export_id"], count)
+    if count == 0:
+        st.session_state.pop("al_export_ready", None)
         st.warning("Нет разметок со статусом accepted_for_training — экспортировать нечего.")
     else:
-        st.success(f"Экспортировано {result['num_samples']} пар image/mask в `{result['dir']}`.")
-        with tempfile.TemporaryDirectory() as tmp:
-            zip_base = str(Path(tmp) / result["export_id"])
-            zip_path = shutil.make_archive(zip_base, "zip", result["dir"])
-            with open(zip_path, "rb") as f:
-                st.download_button(
-                    "Скачать экспорт (ZIP)", data=f.read(),
-                    file_name=f"{result['export_id']}.zip", mime="application/zip",
-                )
+        st.session_state["al_export_ready"] = {
+            "zip_bytes": de.zip_directory(result["dir"]),
+            "export_id": result["export_id"],
+            "count": count,
+            "format": export_format,
+        }
+
+ready = st.session_state.get("al_export_ready")
+if ready:
+    st.success(f"Экспортировано элементов: {ready['count']} (`{ready['export_id']}`).")
+    st.download_button(
+        "⬇️ Скачать экспорт (ZIP)", data=ready["zip_bytes"],
+        file_name=f"{ready['export_id']}.zip", mime="application/zip",
+    )
 
 exports = ds.list_exports(dataset_id)
-if exports:
-    st.caption(f"Ранее выполненные экспорты этого датасета: {', '.join(exports)}")
+exports_s2 = ds.list_exports_s2_style(dataset_id)
+if exports or exports_s2:
+    st.caption(
+        "Ранее выполненные экспорты этого датасета — классический: "
+        f"{', '.join(exports) or '—'}; в формате S2_v2: {', '.join(exports_s2) or '—'}."
+    )

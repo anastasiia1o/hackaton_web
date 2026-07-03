@@ -16,17 +16,35 @@ PDF) — тот же самый run_analysis/reports.export_all, что и ра�
 
 from __future__ import annotations
 
+import tempfile
 import uuid
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image
 
 from src import batch_import as bi
-from src import config, dataset_storage as ds, event_log as ev, reports, storage
+from src import config, dataset_export, dataset_storage as ds, event_log as ev, reports, storage
 from src.pipeline import run_analysis, load_mask
 from ui import file_pickers, viewer
+
+
+def _iter_s2_items(pairs: list[tuple[str, str, str]]):
+    """
+    Лениво (по одному) открыть пары (изображение, маска) для экспорта в
+    формате S2_v2 — не держим все декодированные картинки батча в памяти
+    одновременно, а собираем каждую запись прямо перед записью в архив.
+    """
+    for name, img_path, mask_path in pairs:
+        img = viewer.load_display_image(img_path)
+        mask = load_mask(mask_path)
+        if mask.shape[:2] != (img.size[1], img.size[0]):
+            mask = np.array(
+                Image.fromarray(mask, mode="L").resize(img.size, Image.NEAREST), dtype=np.uint8
+            )
+        yield {"name": name, "image": img, "mask": mask}
 
 st.set_page_config(page_title="OreVision — Пакетная обработка", page_icon="🗂️", layout="wide")
 config.ensure_dirs()
@@ -177,6 +195,10 @@ if config.ML_MODE == "mock":
 run = st.button("▶️ Запустить обработку", type="primary", disabled=not any(r["valid"] for r in queue))
 
 # --- Выполнение -------------------------------------------------------------
+# Результаты кладём в session_state и рендерим НИЖЕ безусловно (не внутри
+# "if run:"), иначе после клика на любую другую кнопку (например, скачать
+# сводку CSV) следующий rerun видел бы run=False и вся сводка/кнопки экспорта
+# пропадали бы — то же "зависание", что было на главной странице.
 if run:
     valid_items = [r for r in queue if r["valid"]]
     params = {"scenario": scenario} if scenario else None
@@ -184,6 +206,7 @@ if run:
     status = st.empty()
     rows: list[dict] = []
     errors: list[str] = []
+    s2_pairs: list[tuple[str, str, str]] = []   # (name, image_path, mask_path) — для экспорта S2_v2
 
     ev.log_batch(dataset_id, "started", total=len(valid_items))
 
@@ -219,6 +242,9 @@ if run:
                 "Тонкие/сульфиды, %": round(result.metrics.fine_of_sulphides * 100, 1),
                 "Проверка": "да" if result.classification.needs_review else "",
             })
+            # Пути (не декодированные картинки!) — бандл S2_v2 собирается лениво,
+            # по одному изображению за раз, только если пользователь его закажет.
+            s2_pairs.append((f"{i:04d}_{img_path.stem}", str(img_path), result.ml.mask_path))
             ev.log_batch(dataset_id, "item_done", filename=r["filename"], ore_class=result.classification.ore_class)
         except Exception as e:  # noqa: BLE001
             msg = f"{r['filename']}: {e}"
@@ -229,7 +255,17 @@ if run:
     status.empty()
     progress.empty()
     ev.log_batch(dataset_id, "finished", done=len(rows), errors=len(errors))
-    st.success(f"Готово: обработано {len(rows)} из {len(valid_items)}.")
+    st.session_state["batch_result"] = {
+        "rows": rows, "errors": errors, "s2_pairs": s2_pairs,
+        "total": len(valid_items), "register_in_dataset": register_in_dataset,
+        "dataset_id": dataset_id,
+    }
+    st.session_state.pop("batch_s2_zip", None)
+
+batch_result = st.session_state.get("batch_result")
+if batch_result:
+    rows, errors = batch_result["rows"], batch_result["errors"]
+    st.success(f"Готово: обработано {len(rows)} из {batch_result['total']}.")
 
     if rows:
         df = pd.DataFrame(rows)
@@ -239,17 +275,37 @@ if run:
         st.subheader("Распределение по классам руды")
         st.bar_chart(df["Класс руды"].value_counts())
 
-        st.download_button(
-            "Скачать сводку (CSV)",
-            data=df.to_csv(index=False).encode("utf-8-sig"),
-            file_name="batch_summary.csv",
-            mime="text/csv",
-        )
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            st.download_button(
+                "Скачать сводку (CSV)",
+                data=df.to_csv(index=False).encode("utf-8-sig"),
+                file_name="batch_summary.csv",
+                mime="text/csv",
+            )
+        with dl_col2:
+            if st.button("📦 Собрать экспорт результатов (ZIP, формат S2_v2)"):
+                with tempfile.TemporaryDirectory() as _tmp:
+                    _bundle_dir = Path(_tmp) / "bundle"
+                    dataset_export.export_s2_bundle(
+                        _bundle_dir, _iter_s2_items(batch_result["s2_pairs"]),
+                        config.CLASS_COLORS, config.CLASS_NAMES,
+                    )
+                    st.session_state["batch_s2_zip"] = dataset_export.zip_directory(_bundle_dir)
+
+            _zip = st.session_state.get("batch_s2_zip")
+            if _zip:
+                st.download_button(
+                    "⬇️ Скачать (ZIP, формат S2_v2)", data=_zip,
+                    file_name="batch_s2v2.zip", mime="application/zip",
+                )
+
         st.caption(f"Отчёты по каждому образцу сохранены в `{config.RESULTS_DIR}`.")
-        if register_in_dataset:
+        if batch_result["register_in_dataset"]:
             st.caption(
-                f"Изображения также зарегистрированы в датасете **{dataset_id}** — "
-                "откройте «Разметка эксперта», чтобы их подписать."
+                f"Изображения также зарегистрированы в датасете "
+                f"**{batch_result['dataset_id']}** — откройте «Разметка эксперта», "
+                "чтобы их подписать."
             )
 
     if errors:
