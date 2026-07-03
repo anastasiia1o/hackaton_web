@@ -1,0 +1,127 @@
+<!doctype html>
+<!--
+  OreVision — выбор ПАПКИ (рекурсивно, через системный проводник) или
+  НЕСКОЛЬКИХ файлов, без npm/React (тот же dependency-free подход, что и
+  ui/region_picker_frontend/index.html и ui/viewer.py:interactive_viewer_html).
+
+  Браузер не даёт JS доступа к абсолютному пути выбранной папки/файлов —
+  поэтому единственный надёжный способ передать содержимое в Python — прочитать
+  байты на стороне браузера (FileReader) и передать base64 через
+  streamlit:setComponentValue. Для очень больших наборов (десятки ГБ) в UI
+  остаётся вариант "ручной путь к папке" (без копирования, см. pages/1).
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; font: 14px/1.4 system-ui, sans-serif; }
+  #wrap { display: flex; flex-direction: column; gap: 8px; }
+  button {
+    border: 1px solid #4a4d55; border-radius: 6px; background: #22252c; color: #e7e9ee;
+    padding: 8px 14px; font-size: 14px; cursor: pointer;
+  }
+  button:hover { background: #2d313a; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { color: #aeb2bb; font-size: 12.5px; }
+  #status.err { color: #e05a5a; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <input id="input" type="file" style="display:none" multiple />
+  <button id="btn">Выбрать…</button>
+  <div id="status"></div>
+</div>
+<script>
+(function () {
+  var input = document.getElementById('input');
+  var btn = document.getElementById('btn');
+  var status = document.getElementById('status');
+  var mode = 'files';      // 'folder' | 'files' — из args
+  var label = 'Выбрать…';
+  var maxTotalMb = 800;    // мягкое предупреждение (не блокирует)
+
+  function post(msg) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), '*');
+  }
+  function setHeight() {
+    post({ type: 'streamlit:setFrameHeight', height: document.documentElement.scrollHeight || 60 });
+  }
+
+  function readAsDataURL(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(r.result); };
+      r.onerror = function () { reject(r.error); };
+      r.readAsDataURL(file);
+    });
+  }
+
+  function humanMb(bytes) { return (bytes / (1024 * 1024)).toFixed(1); }
+
+  input.addEventListener('change', function () {
+    var files = Array.prototype.slice.call(input.files || []);
+    if (!files.length) return;
+
+    var totalBytes = files.reduce(function (a, f) { return a + f.size; }, 0);
+    btn.disabled = true;
+    status.className = '';
+    status.textContent = 'Читаю файлы: 0/' + files.length + ' (' + humanMb(totalBytes) + ' МБ)…';
+
+    var done = 0;
+    Promise.all(files.map(function (f) {
+      return readAsDataURL(f).then(function (dataUrl) {
+        done += 1;
+        status.textContent = 'Читаю файлы: ' + done + '/' + files.length + '…';
+        var comma = dataUrl.indexOf(',');
+        return {
+          name: f.name,
+          relative_path: f.webkitRelativePath || f.name,
+          size: f.size,
+          data_b64: dataUrl.slice(comma + 1),
+        };
+      });
+    })).then(function (results) {
+      btn.disabled = false;
+      status.textContent = 'Готово: ' + results.length + ' файл(ов), ' + humanMb(totalBytes) + ' МБ.';
+      post({ type: 'streamlit:setComponentValue', value: { files: results, nonce: Date.now() } });
+      setHeight();
+    }).catch(function (err) {
+      btn.disabled = false;
+      status.className = 'err';
+      status.textContent = 'Ошибка чтения файлов: ' + err;
+      setHeight();
+    });
+  });
+
+  function applyArgs(args) {
+    args = args || {};
+    mode = args.mode || 'files';
+    label = args.label || (mode === 'folder' ? 'Выбрать папку…' : 'Выбрать файлы…');
+    btn.textContent = label;
+    if (mode === 'folder') {
+      input.setAttribute('webkitdirectory', '');
+      input.setAttribute('directory', '');
+    } else {
+      input.removeAttribute('webkitdirectory');
+      input.removeAttribute('directory');
+    }
+    if (args.accept) input.setAttribute('accept', args.accept);
+    if (typeof args.max_total_mb === 'number') maxTotalMb = args.max_total_mb;
+  }
+
+  btn.addEventListener('click', function () { input.click(); });
+
+  window.addEventListener('message', function (event) {
+    var d = event.data;
+    if (!d || d.type !== 'streamlit:render') return;
+    applyArgs(d.args);
+    setHeight();
+  });
+
+  post({ type: 'streamlit:componentReady', apiVersion: 1 });
+  setHeight();
+})();
+</script>
+</body>
+</html>

@@ -52,7 +52,7 @@ class QueueItem:
         return {
             "Файл": self.filename,
             "Формат": self.format,
-            "Размер файла": _human_size(self.file_size_bytes),
+            "Размер файла": human_size(self.file_size_bytes),
             "Размер изображения": (
                 f"{self.width}×{self.height}" if self.width and self.height else "—"
             ),
@@ -61,7 +61,7 @@ class QueueItem:
         }
 
 
-def _human_size(n: int) -> str:
+def human_size(n: int) -> str:
     size = float(n)
     for unit in ("Б", "КБ", "МБ", "ГБ"):
         if size < 1024 or unit == "ГБ":
