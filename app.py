@@ -233,46 +233,149 @@ with col_metrics:
         for wmsg in result.ml.warnings:
             st.warning(wmsg)
 
-# --- Инспектор участка (высокое разрешение, ленивый декод по кнопке) ---------
+# --- Инспектор участка: просмотр в высоком разрешении + быстрая коррекция ---
+# Один и тот же выделенный участок используется и для просмотра, и для правки
+# (раньше это были два отдельных лассо в двух разных местах страницы —
+# сводили с ума необходимостью обводить одну и ту же область дважды).
 st.divider()
-with st.expander("🔬 Инспектор участка (высокое разрешение)"):
-    st.caption(
-        "Обзор ниже уменьшен для скорости. Обведите область мышью замкнутой "
-        "линией (не обязательно прямоугольником) и посмотрите её в максимально "
-        "возможном разрешении. Тяжёлый исходник декодируется только по кнопке "
-        "(не при каждом действии). Для гигапиксельных панорам детализация "
-        "ограничена лимитом памяти."
-    )
-    insp_lasso = viewer.lasso_picker(
-        base, key="insp_lasso",
-        color="rgba(255, 210, 60, .28)", border_color="#ffcf33",
-    )
-    do_inspect = st.button("Показать участок в высоком разрешении")
+st.subheader("🔬 Инспектор участка")
+st.caption(
+    "Обведите область мышью замкнутой линией (не обязательно прямоугольником). "
+    "Дальше можно посмотреть её в высоком разрешении и/или сразу указать "
+    "верный класс — исправление сохранится для дообучения (active learning)."
+)
 
-    if do_inspect:
-        if insp_lasso is None:
-            st.warning("Сначала обведите область мышью замкнутой линией на изображении выше.")
-        else:
-            ins_x0, ins_y0, ins_x1, ins_y1 = insp_lasso["bbox"]
-            with st.spinner("Готовим участок в высоком разрешении…"):
-                crop, meta = viewer.crop_region_highres(
-                    str(image_path), ins_x0, ins_y0, ins_x1, ins_y1
-                )
-            rx = meta["region_px_orig"]
-            st.image(
-                crop, use_container_width=True,
-                caption=(f"Участок оригинала {rx[2]}×{rx[3]} px @ ({rx[0]},{rx[1]}) → "
-                         f"показано {meta['shown_size'][0]}×{meta['shown_size'][1]} "
-                         f"(область — bounding box обведённой линии)"),
+mask_for_export = mask
+if mask_for_export.shape[:2] != (base.size[1], base.size[0]):
+    mask_for_export = np.array(
+        Image.fromarray(mask_for_export, mode="L").resize(base.size, Image.NEAREST), dtype=np.uint8
+    )
+
+corr_class = st.selectbox(
+    "Верный класс участка (для сохранения исправления)",
+    options=[config.CLASS_ORDINARY, config.CLASS_FINE,
+             config.CLASS_TALC, config.CLASS_ARTIFACT],
+    format_func=lambda c: config.CLASS_NAMES[c],
+)
+r, g, b, _a = config.CLASS_COLORS.get(corr_class, (255, 210, 60, 90))
+insp_lasso = viewer.lasso_picker(
+    base, key="insp_lasso",
+    color=f"rgba({r}, {g}, {b}, .30)", border_color=f"#{r:02x}{g:02x}{b:02x}",
+)
+
+was_name = "—"
+if insp_lasso is not None:
+    was_cls = dataset_export.majority_class_in_polygon(
+        mask_for_export, insp_lasso["points"], base.width, base.height,
+    )
+    was_name = config.CLASS_NAMES.get(was_cls, "—") if was_cls is not None else "—"
+    st.caption(f"Текущее предсказание модели для этой области: **{was_name}**")
+
+comment = st.text_input("Комментарий (необязательно)", key="insp_comment")
+author = st.text_input("Автор", value="geolog", key="insp_author")
+
+view_col, save_col = st.columns(2)
+with view_col:
+    do_inspect = st.button("🔍 Показать в высоком разрешении", use_container_width=True)
+with save_col:
+    save_corr = st.button("💾 Сохранить исправление", type="primary", use_container_width=True)
+
+if do_inspect:
+    if insp_lasso is None:
+        st.warning("Сначала обведите область мышью замкнутой линией на изображении выше.")
+    else:
+        ins_x0, ins_y0, ins_x1, ins_y1 = insp_lasso["bbox"]
+        with st.spinner("Готовим участок в высоком разрешении…"):
+            crop, meta = viewer.crop_region_highres(
+                str(image_path), ins_x0, ins_y0, ins_x1, ins_y1
             )
-            if meta["capped"]:
-                st.info(
-                    f"Исходник очень большой ({meta['orig_size'][0]}×{meta['orig_size'][1]}) — "
-                    f"для инспекции понижен (масштаб {meta['native_scale']}), чтобы уложиться "
-                    f"в память. Участок всё равно детальнее обзора."
+        rx = meta["region_px_orig"]
+        st.image(
+            crop, use_container_width=True,
+            caption=(f"Участок оригинала {rx[2]}×{rx[3]} px @ ({rx[0]},{rx[1]}) → "
+                     f"показано {meta['shown_size'][0]}×{meta['shown_size'][1]} "
+                     f"(область — bounding box обведённой линии)"),
+        )
+        if meta["capped"]:
+            st.info(
+                f"Исходник очень большой ({meta['orig_size'][0]}×{meta['orig_size'][1]}) — "
+                f"для инспекции понижен (масштаб {meta['native_scale']}), чтобы уложиться "
+                f"в память. Участок всё равно детальнее обзора."
+            )
+        else:
+            st.success("Участок показан в нативном разрешении.")
+
+if save_corr:
+    if insp_lasso is None:
+        st.warning("Сначала обведите область мышью замкнутой линией на изображении выше.")
+    else:
+        corr_x0, corr_y0, corr_x1, corr_y1 = insp_lasso["bbox"]
+        px0, py0 = int(corr_x0 * w), int(corr_y0 * h)
+        px1, py1 = int(corr_x1 * w), int(corr_y1 * h)
+        polygon_px = [[round(x * w), round(y * h)] for x, y in insp_lasso["points"]]
+        saved = storage.save_correction(str(image_path), {
+            "was_class_name": was_name,
+            "correct_class": corr_class,
+            "correct_class_name": config.CLASS_NAMES[corr_class],
+            "bbox_px": [px0, py0, px1 - px0, py1 - py0],
+            "polygon_px": polygon_px,
+            "region_fraction": {
+                "x0": round(corr_x0, 4), "y0": round(corr_y0, 4),
+                "x1": round(corr_x1, 4), "y1": round(corr_y1, 4),
+            },
+            "image_size": {"width": w, "height": h},
+            "comment": comment,
+            "author": author or "geolog",
+        })
+        st.success(f"Исправление сохранено: {saved.name}")
+
+# --- История исправлений: было → стало (персистентно, не зависит от кликов) --
+existing_corrections = storage.list_corrections(str(image_path))
+if existing_corrections:
+    st.markdown(f"**История исправлений этого изображения ({len(existing_corrections)}) — было → стало**")
+    st.dataframe(
+        [{
+            "Было": c.get("was_class_name", "—"),
+            "Стало": c.get("correct_class_name", c.get("correct_class")),
+            "Комментарий": c.get("comment", ""),
+            "Автор": c.get("author", ""),
+            "Когда": c.get("created_at", ""),
+        } for c in existing_corrections],
+        use_container_width=True, hide_index=True,
+    )
+
+    if st.button("📦 Собрать экспорт исправлений (ZIP, формат S2_v2)"):
+        corr_items = []
+        for i, c in enumerate(existing_corrections):
+            rf = c.get("region_fraction")
+            if not rf:
+                continue
+            crop, _meta = viewer.crop_region_highres(
+                str(image_path), rf["x0"], rf["y0"], rf["x1"], rf["y1"],
+            )
+            fill_cls = int(c.get("correct_class", 0))
+            mask_arr = np.full((crop.height, crop.width), fill_cls, dtype=np.uint8)
+            corr_items.append({
+                "name": f"{image_path.stem}_corr_{i + 1:03d}", "image": crop, "mask": mask_arr,
+            })
+        if not corr_items:
+            st.warning("Нет исправлений с сохранёнными координатами для экспорта.")
+            st.session_state.pop("corr_s2_zip", None)
+        else:
+            with tempfile.TemporaryDirectory() as _tmp:
+                _bundle_dir = Path(_tmp) / "bundle"
+                dataset_export.export_s2_bundle(
+                    _bundle_dir, corr_items, config.CLASS_COLORS, config.CLASS_NAMES,
                 )
-            else:
-                st.success("Участок показан в нативном разрешении.")
+                st.session_state["corr_s2_zip"] = dataset_export.zip_directory(_bundle_dir)
+
+    _corr_zip = st.session_state.get("corr_s2_zip")
+    if _corr_zip:
+        st.download_button(
+            "⬇️ Скачать исправления (ZIP, формат S2_v2)",
+            data=_corr_zip, file_name=f"{image_path.stem}_corrections_s2v2.zip",
+            mime="application/zip",
+        )
 
 # --- Экспорт ----------------------------------------------------------------
 st.divider()
@@ -337,11 +440,6 @@ st.caption(
     "Тот же результат, но в виде папок imgs/masks/masks_colored/masks_human — "
     "структура приблизительно как в примере датасета S2_v2."
 )
-mask_for_export = mask
-if mask_for_export.shape[:2] != (base.size[1], base.size[0]):
-    mask_for_export = np.array(
-        Image.fromarray(mask_for_export, mode="L").resize(base.size, Image.NEAREST), dtype=np.uint8
-    )
 with tempfile.TemporaryDirectory() as _tmp:
     _bundle_dir = Path(_tmp) / "bundle"
     dataset_export.export_s2_bundle(
@@ -357,100 +455,3 @@ st.download_button(
     mime="application/zip",
 )
 
-# --- Экспертная коррекция: выделить участок и указать правильный класс -------
-st.divider()
-with st.expander("Экспертная проверка: отметить и исправить участок (active learning)"):
-    st.caption(
-        "Обведите область мышью замкнутой линией прямо на изображении (не "
-        "обязательно прямоугольником) и укажите правильный класс. Исправление "
-        "сохраняется локально (для будущего дообучения ML)."
-    )
-    ed_ctrl, ed_prev = st.columns([2, 3])
-    with ed_ctrl:
-        corr_class = st.selectbox(
-            "Правильный класс участка",
-            options=[config.CLASS_ORDINARY, config.CLASS_FINE,
-                     config.CLASS_TALC, config.CLASS_ARTIFACT],
-            format_func=lambda c: config.CLASS_NAMES[c],
-        )
-        comment = st.text_input("Комментарий геолога")
-        author = st.text_input("Автор", value="geolog")
-        save_corr = st.button("Сохранить исправление")
-
-    with ed_prev:
-        r, g, b, _a = config.CLASS_COLORS.get(corr_class, (255, 210, 60, 90))
-        corr_lasso = viewer.lasso_picker(
-            base, key="corr_lasso",
-            color=f"rgba({r}, {g}, {b}, .35)", border_color=f"#{r:02x}{g:02x}{b:02x}",
-        )
-
-    if save_corr:
-        if corr_lasso is None:
-            st.warning("Сначала обведите область мышью замкнутой линией на изображении.")
-        else:
-            corr_x0, corr_y0, corr_x1, corr_y1 = corr_lasso["bbox"]
-            # Доли -> пиксели ОРИГИНАЛЬНОГО изображения (w, h — исходный размер).
-            px0, py0 = int(corr_x0 * w), int(corr_y0 * h)
-            px1, py1 = int(corr_x1 * w), int(corr_y1 * h)
-            polygon_px = [[round(x * w), round(y * h)] for x, y in corr_lasso["points"]]
-            saved = storage.save_correction(str(image_path), {
-                "correct_class": corr_class,
-                "correct_class_name": config.CLASS_NAMES[corr_class],
-                "bbox_px": [px0, py0, px1 - px0, py1 - py0],
-                "polygon_px": polygon_px,
-                "region_fraction": {
-                    "x0": round(corr_x0, 4), "y0": round(corr_y0, 4),
-                    "x1": round(corr_x1, 4), "y1": round(corr_y1, 4),
-                },
-                "image_size": {"width": w, "height": h},
-                "comment": comment,
-                "author": author or "geolog",
-            })
-            st.success(f"Исправление сохранено: {saved.name}")
-
-    existing = storage.list_corrections(str(image_path))
-    if existing:
-        st.caption(f"Сохранённых исправлений по этому изображению: {len(existing)}")
-        st.dataframe(
-            [{
-                "класс": c.get("correct_class_name", c.get("correct_class")),
-                "bbox_px": c.get("bbox_px"),
-                "комментарий": c.get("comment", ""),
-                "автор": c.get("author", ""),
-            } for c in existing],
-            use_container_width=True, hide_index=True,
-        )
-
-        st.markdown("**Экспорт исправлений «как датасет» (S2_v2)**")
-        if st.button("📦 Собрать экспорт исправлений (ZIP, формат S2_v2)"):
-            corr_items = []
-            for i, c in enumerate(existing):
-                rf = c.get("region_fraction")
-                if not rf:
-                    continue
-                crop, _meta = viewer.crop_region_highres(
-                    str(image_path), rf["x0"], rf["y0"], rf["x1"], rf["y1"],
-                )
-                fill_cls = int(c.get("correct_class", 0))
-                mask_arr = np.full((crop.height, crop.width), fill_cls, dtype=np.uint8)
-                corr_items.append({
-                    "name": f"{image_path.stem}_corr_{i + 1:03d}", "image": crop, "mask": mask_arr,
-                })
-            if not corr_items:
-                st.warning("Нет исправлений с сохранёнными координатами для экспорта.")
-                st.session_state.pop("corr_s2_zip", None)
-            else:
-                with tempfile.TemporaryDirectory() as _tmp:
-                    _bundle_dir = Path(_tmp) / "bundle"
-                    dataset_export.export_s2_bundle(
-                        _bundle_dir, corr_items, config.CLASS_COLORS, config.CLASS_NAMES,
-                    )
-                    st.session_state["corr_s2_zip"] = dataset_export.zip_directory(_bundle_dir)
-
-        _corr_zip = st.session_state.get("corr_s2_zip")
-        if _corr_zip:
-            st.download_button(
-                "⬇️ Скачать исправления (ZIP, формат S2_v2)",
-                data=_corr_zip, file_name=f"{image_path.stem}_corrections_s2v2.zip",
-                mime="application/zip",
-            )

@@ -95,10 +95,18 @@ disp = viewer.load_display_image(str(image_path))
 roi = ds.get_or_create_whole_image_roi(dataset_id, image_id, disp)
 region_id = roi["region_id"]
 
-_, saved_state, saved_shapes = ds.load_annotation(dataset_id, image_id, region_id)
+saved_mask, saved_state, saved_shapes = ds.load_annotation(dataset_id, image_id, region_id)
 
 # --- Состояние черновика (набранные, но ещё не сохранённые/уже сохранённые подписанные участки) ---
 draft_key = f"al_draft_{dataset_id}_{image_id}"
+baseline_key = f"al_baseline_{dataset_id}_{image_id}"
+if baseline_key not in st.session_state:
+    # Маска НА МОМЕНТ ОТКРЫТИЯ (до правок в этой сессии) — точка отсчёта для
+    # таблицы «было → стало» ниже. Кладём один раз за сессию редактирования.
+    st.session_state[baseline_key] = (
+        saved_mask if saved_mask is not None else np.zeros((disp.height, disp.width), dtype=np.uint8)
+    )
+
 if draft_key not in st.session_state:
     loaded = []
     if saved_shapes and saved_shapes.get("features"):
@@ -170,12 +178,20 @@ if add_clicked and pending is not None:
 elif pending is None:
     st.caption("Обведите область мышью на изображении выше, затем нажмите «Добавить».")
 
-# --- Список добавленных участков ---------------------------------------------
-st.subheader(f"Подписанные участки ({len(st.session_state[draft_key])})")
+# --- Список добавленных участков: было (до правок в этой сессии) → стало ----
+st.subheader(f"Подписанные участки ({len(st.session_state[draft_key])}) — было → стало")
 if st.session_state[draft_key]:
-    table = [{
-        "№": i + 1, "Класс/подпись": _shape_label(s), "Точек контура": len(s["points"]),
-    } for i, s in enumerate(st.session_state[draft_key])]
+    baseline_mask = st.session_state[baseline_key]
+    table = []
+    for i, s in enumerate(st.session_state[draft_key]):
+        was_cid = de.majority_class_in_polygon(baseline_mask, s["points"], disp.width, disp.height)
+        was_cls = _class_by_id(was_cid) if was_cid is not None else None
+        table.append({
+            "№": i + 1,
+            "Было": was_cls.name_ru if was_cls else "—",
+            "Стало": _shape_label(s),
+            "Точек контура": len(s["points"]),
+        })
     st.dataframe(pd.DataFrame(table), use_container_width=True, hide_index=True)
 
     remove_opts = [f"{i + 1}. {_shape_label(s)}" for i, s in enumerate(st.session_state[draft_key])]
