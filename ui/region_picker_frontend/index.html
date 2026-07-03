@@ -1,0 +1,213 @@
+<!doctype html>
+<!--
+  OreVision — интерактивный выбор прямоугольной области на изображении
+  (drag + resize мышью/пальцем, как выделение области на рабочем столе Windows).
+
+  Это ручная реализация Streamlit Components протокола (без npm/React —
+  тот же "dependency-free" подход, что и ui/viewer.py:interactive_viewer_html).
+  Три сообщения родителю: streamlit:componentReady, streamlit:setFrameHeight,
+  streamlit:setComponentValue. Один входящий тип: streamlit:render (args).
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #wrap { position: relative; width: 100%; line-height: 0; }
+  #img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; border-radius: 6px; }
+  #stage { position: absolute; inset: 0; touch-action: none; cursor: crosshair; }
+  #rect {
+    position: absolute; box-sizing: border-box; display: none; cursor: move;
+    border: 2px solid var(--bc, #ffcf33);
+    background: var(--fc, rgba(255, 207, 51, .28));
+  }
+  .h {
+    position: absolute; width: 14px; height: 14px; margin: -8px;
+    background: #fff; border: 2px solid var(--bc, #ffcf33); border-radius: 3px;
+    box-sizing: border-box;
+  }
+  .h[data-h="nw"] { top: 0; left: 0; cursor: nwse-resize; }
+  .h[data-h="n"]  { top: 0; left: 50%; cursor: ns-resize; }
+  .h[data-h="ne"] { top: 0; left: 100%; cursor: nesw-resize; }
+  .h[data-h="e"]  { top: 50%; left: 100%; cursor: ew-resize; }
+  .h[data-h="se"] { top: 100%; left: 100%; cursor: nwse-resize; }
+  .h[data-h="s"]  { top: 100%; left: 50%; cursor: ns-resize; }
+  .h[data-h="sw"] { top: 100%; left: 0; cursor: nesw-resize; }
+  .h[data-h="w"]  { top: 50%; left: 0; cursor: ew-resize; }
+  #hint {
+    position: absolute; left: 6px; bottom: 6px; z-index: 5; pointer-events: none;
+    background: rgba(20, 22, 28, .72); color: #d5d8de; border-radius: 5px;
+    padding: 2px 8px; font: 11px system-ui, sans-serif;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <img id="img" draggable="false" alt="" />
+  <div id="stage">
+    <div id="rect">
+      <div class="h" data-h="nw"></div><div class="h" data-h="n"></div><div class="h" data-h="ne"></div>
+      <div class="h" data-h="e"></div><div class="h" data-h="se"></div><div class="h" data-h="s"></div>
+      <div class="h" data-h="sw"></div><div class="h" data-h="w"></div>
+    </div>
+  </div>
+  <div id="hint">Тяните область мышью · за уголок/край — изменить размер</div>
+</div>
+<script>
+(function () {
+  var MIN_FRAC = 0.02; // минимальный размер стороны (2% изображения)
+
+  var img = document.getElementById('img');
+  var stage = document.getElementById('stage');
+  var rectEl = document.getElementById('rect');
+
+  var initialized = false;
+  var lastSrc = null;
+  var rect = { x0: 0.3, y0: 0.3, x1: 0.6, y1: 0.6 }; // доли 0..1
+  var sentKey = null;
+  var mode = null, startPt = null, startRect = null, activeHandle = null;
+
+  function post(msg) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, msg), '*');
+  }
+  function setHeight() {
+    post({ type: 'streamlit:setFrameHeight', height: document.documentElement.scrollHeight || 10 });
+  }
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function round4(v) { return Math.round(v * 10000) / 10000; }
+
+  function drawRect() {
+    var w = stage.clientWidth, h = stage.clientHeight;
+    var x0 = Math.min(rect.x0, rect.x1), x1 = Math.max(rect.x0, rect.x1);
+    var y0 = Math.min(rect.y0, rect.y1), y1 = Math.max(rect.y0, rect.y1);
+    rectEl.style.display = 'block';
+    rectEl.style.left = (x0 * w) + 'px';
+    rectEl.style.top = (y0 * h) + 'px';
+    rectEl.style.width = Math.max(1, (x1 - x0) * w) + 'px';
+    rectEl.style.height = Math.max(1, (y1 - y0) * h) + 'px';
+  }
+
+  function sendValue() {
+    var x0 = Math.min(rect.x0, rect.x1), x1 = Math.max(rect.x0, rect.x1);
+    var y0 = Math.min(rect.y0, rect.y1), y1 = Math.max(rect.y0, rect.y1);
+    var v = { x0: round4(x0), y0: round4(y0), x1: round4(x1), y1: round4(y1) };
+    var key = v.x0 + ',' + v.y0 + ',' + v.x1 + ',' + v.y1;
+    if (key === sentKey) return;
+    sentKey = key;
+    post({ type: 'streamlit:setComponentValue', value: v });
+  }
+
+  function ptFrac(e) {
+    var r = stage.getBoundingClientRect();
+    var w = r.width || 1, h = r.height || 1;
+    return { x: clamp((e.clientX - r.left) / w, 0, 1), y: clamp((e.clientY - r.top) / h, 0, 1) };
+  }
+
+  function hitHandle(e) {
+    return (e.target && e.target.classList && e.target.classList.contains('h'))
+      ? e.target.getAttribute('data-h') : null;
+  }
+
+  function resizeWith(h, p) {
+    if (h.indexOf('w') >= 0) rect.x0 = clamp(p.x, 0, 1);
+    if (h.indexOf('e') >= 0) rect.x1 = clamp(p.x, 0, 1);
+    if (h.indexOf('n') >= 0) rect.y0 = clamp(p.y, 0, 1);
+    if (h.indexOf('s') >= 0) rect.y1 = clamp(p.y, 0, 1);
+  }
+
+  stage.addEventListener('pointerdown', function (e) {
+    var h = hitHandle(e);
+    var p = ptFrac(e);
+    startPt = p;
+    startRect = { x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1 };
+    if (h) {
+      mode = 'resize'; activeHandle = h;
+    } else if (e.target === rectEl) {
+      mode = 'move';
+    } else {
+      mode = 'draw';
+      rect = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+    }
+    stage.setPointerCapture(e.pointerId);
+    drawRect();
+    e.preventDefault();
+  });
+
+  stage.addEventListener('pointermove', function (e) {
+    if (!mode) return;
+    var p = ptFrac(e);
+    if (mode === 'draw') {
+      rect.x1 = p.x; rect.y1 = p.y;
+    } else if (mode === 'move') {
+      var dx = p.x - startPt.x, dy = p.y - startPt.y;
+      var w0 = startRect.x1 - startRect.x0, h0 = startRect.y1 - startRect.y0;
+      var nx0 = clamp(startRect.x0 + dx, 0, Math.max(0, 1 - Math.abs(w0)));
+      var ny0 = clamp(startRect.y0 + dy, 0, Math.max(0, 1 - Math.abs(h0)));
+      rect.x0 = nx0; rect.x1 = nx0 + w0; rect.y0 = ny0; rect.y1 = ny0 + h0;
+    } else if (mode === 'resize') {
+      resizeWith(activeHandle, p);
+    }
+    drawRect();
+  });
+
+  function endDrag() {
+    if (!mode) return;
+    var x0 = Math.min(rect.x0, rect.x1), x1 = Math.max(rect.x0, rect.x1);
+    var y0 = Math.min(rect.y0, rect.y1), y1 = Math.max(rect.y0, rect.y1);
+    if (x1 - x0 < MIN_FRAC) {
+      var cx = (x0 + x1) / 2;
+      x0 = clamp(cx - MIN_FRAC / 2, 0, 1 - MIN_FRAC); x1 = x0 + MIN_FRAC;
+    }
+    if (y1 - y0 < MIN_FRAC) {
+      var cy = (y0 + y1) / 2;
+      y0 = clamp(cy - MIN_FRAC / 2, 0, 1 - MIN_FRAC); y1 = y0 + MIN_FRAC;
+    }
+    rect = { x0: x0, y0: y0, x1: x1, y1: y1 };
+    mode = null; activeHandle = null;
+    drawRect();
+    sendValue();
+  }
+  stage.addEventListener('pointerup', endDrag);
+  stage.addEventListener('pointercancel', endDrag);
+  stage.addEventListener('pointerleave', function (e) {
+    // Кнопка мыши отпущена за пределами stage (например, вне iframe) — завершаем drag.
+    if (mode && e.buttons === 0) endDrag();
+  });
+
+  function applyArgs(args) {
+    args = args || {};
+    if (args.color) rectEl.style.setProperty('--fc', args.color);
+    if (args.border_color) rectEl.style.setProperty('--bc', args.border_color);
+
+    var srcChanged = args.src && args.src !== lastSrc;
+    if (srcChanged) {
+      lastSrc = args.src;
+      img.src = args.src;
+    }
+    // Новую bbox из Python берём только один раз при инициализации (или при
+    // смене картинки) — иначе локальное перетаскивание "отскакивало" бы
+    // назад на каждый rerun Streamlit.
+    if (!initialized || srcChanged) {
+      initialized = true;
+      var b = args.bbox || [0.3, 0.3, 0.6, 0.6];
+      rect = { x0: b[0], y0: b[1], x1: b[2], y1: b[3] };
+      drawRect();
+    }
+  }
+
+  window.addEventListener('message', function (event) {
+    var d = event.data;
+    if (!d || d.type !== 'streamlit:render') return;
+    applyArgs(d.args);
+    setHeight();
+  });
+
+  img.addEventListener('load', function () { drawRect(); setHeight(); });
+  window.addEventListener('resize', function () { drawRect(); setHeight(); });
+
+  post({ type: 'streamlit:componentReady', apiVersion: 1 });
+  setHeight();
+})();
+</script>
+</body>
+</html>
