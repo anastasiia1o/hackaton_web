@@ -50,12 +50,14 @@ def save_correction(image_path: str, correction: dict) -> Path:
     """
     Сохранить экспертное исправление (для будущего дообучения ML).
     correction — произвольный dict: {class, bbox/polygon, comment, author}.
+    Если в correction уже есть "created_at" — используем его как есть.
     """
     d = result_dir(image_path) / "corrections"
     d.mkdir(parents=True, exist_ok=True)
+    record = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), **correction}
     fname = f"corr_{int(time.time()*1000)}.json"
     path = d / fname
-    path.write_text(json.dumps(correction, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 

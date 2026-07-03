@@ -22,6 +22,27 @@ def _sample_mask(w=40, h=30):
     return mask
 
 
+def test_majority_class_in_polygon_picks_dominant_class():
+    mask = _sample_mask(40, 30)  # 10x10 блок класса 1 в углу (0..10,0..10)
+    # полигон, полностью накрывающий блок класса 1
+    points = [(0.0, 0.0), (0.25, 0.0), (0.25, 1 / 3), (0.0, 1 / 3)]
+    cls = de.majority_class_in_polygon(mask, points, width=40, height=30)
+    assert cls == 1
+
+
+def test_majority_class_in_polygon_background():
+    mask = _sample_mask(40, 30)
+    points = [(0.7, 0.7), (0.95, 0.7), (0.95, 0.95), (0.7, 0.95)]
+    cls = de.majority_class_in_polygon(mask, points, width=40, height=30)
+    assert cls == 0
+
+
+def test_majority_class_in_polygon_too_few_points_returns_none():
+    mask = _sample_mask(40, 30)
+    assert de.majority_class_in_polygon(mask, [(0.1, 0.1), (0.2, 0.2)], 40, 30) is None
+    assert de.majority_class_in_polygon(mask, [], 40, 30) is None
+
+
 def test_mask_to_id_image_round_trip():
     mask = _sample_mask()
     img = de.mask_to_id_image(mask)

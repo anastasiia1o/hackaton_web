@@ -20,10 +20,48 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+
+def majority_class_in_polygon(
+    mask: np.ndarray,
+    points: list[tuple[float, float]],
+    width: int,
+    height: int,
+) -> Optional[int]:
+    """
+    Класс с наибольшим числом пикселей ВНУТРИ произвольного полигона (лассо).
+
+    `points` — вершины в долях (0..1) изображения размером width×height (так
+    их отдаёт ui.viewer.lasso_picker). `mask` — 2D-массив кодов классов; если
+    его размер не совпадает с width×height, приводим (NEAREST) без потери
+    точности кодов классов. Используется для «было» в таблице исправлений
+    (какой класс предсказала модель для выделенной области ДО коррекции).
+
+    Возвращает None, если полигон вырожден (<3 точек) или ничего не накрыл.
+    """
+    if len(points) < 3:
+        return None
+    poly_px = [(x * width, y * height) for x, y in points]
+    poly_img = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(poly_img).polygon(poly_px, fill=1)
+    poly_mask = np.array(poly_img, dtype=bool)
+
+    if mask.shape[:2] != (height, width):
+        mask = np.array(
+            Image.fromarray(mask.astype(np.uint8), mode="L").resize((width, height), Image.NEAREST),
+            dtype=np.uint8,
+        )
+    if not poly_mask.any():
+        return None
+    vals = mask[poly_mask]
+    if vals.size == 0:
+        return None
+    counts = np.bincount(vals.astype(np.int64))
+    return int(np.argmax(counts))
 
 
 def mask_to_id_image(mask: np.ndarray) -> Image.Image:
