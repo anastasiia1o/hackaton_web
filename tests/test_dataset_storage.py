@@ -5,6 +5,8 @@
 чтобы тесты не оставляли мусор в рабочем пространстве репозитория.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -177,3 +179,27 @@ def test_export_active_learning_filters_by_status(tmp_path):
     images = list((export_dir / "images").iterdir())
     masks = list((export_dir / "masks").iterdir())
     assert len(images) == 1 and len(masks) == 1
+
+
+def test_export_active_learning_s2_style_writes_imgs_masks_layout(tmp_path):
+    img_path = tmp_path / "pano.png"
+    Image.new("RGB", (300, 200)).save(img_path)
+    row = ds.register_image("ds1", filename="pano.png", source="manual_path", source_path=str(img_path))
+    image_id = row["image_id"]
+    roi = ds.create_roi(
+        "ds1", image_id, x=0, y=0, width=50, height=40,
+        source_image_width=300, source_image_height=200,
+        roi_image=Image.new("RGB", (50, 40)),
+    )
+    mask = np.ones((40, 50), dtype=np.uint8)
+    ds.save_annotation("ds1", image_id, roi["region_id"], mask=mask, status=ac.STATUS_ACCEPTED)
+
+    result = ds.export_active_learning_s2_style("ds1")
+    assert result["num_items"] == 1
+    edir = tmp_path / "datasets" / "ds1" / "exports" / "active_learning_s2v2" / result["export_id"]
+    assert edir == Path(result["dir"])
+    assert list(edir.glob("imgs/*.jpg"))
+    assert list(edir.glob("masks/*.png"))
+    assert list(edir.glob("masks_colored/*.png"))
+    assert list(edir.glob("masks_human/*.jpg"))
+    assert result["export_id"] in ds.list_exports_s2_style("ds1")
