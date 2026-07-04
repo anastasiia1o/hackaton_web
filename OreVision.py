@@ -147,7 +147,7 @@ if image_path is None:
 # Сменили изображение → сбрасываем состояние активного обучения предыдущего
 # снимка (иначе «стало»/дообученный чекпоинт показались бы для чужой картинки).
 if st.session_state.get("al_image_stem") != image_path.stem:
-    for _k in ("al_after", "al_ckpt", "al_bg_ckpt", "al_version", "corr_s2_zip"):
+    for _k in ("al_after", "al_ckpt", "al_version", "corr_s2_zip"):
         st.session_state.pop(_k, None)
     st.session_state["al_image_stem"] = image_path.stem
 
@@ -462,9 +462,9 @@ if existing_corrections:
 
     # --- Стереть неверные/лишние исправления -------------------------------
     # Стирание сбрасывает и накопленное активное обучение этого снимка: иначе
-    # эффект уже удалённого исправления остался бы «запечён» в чекпоинтах
-    # al_ckpt/al_bg_ckpt, и стирание выглядело бы так, будто ничего не изменилось.
-    _RESET_AL_KEYS = ("al_after", "al_ckpt", "al_bg_ckpt", "al_version", "corr_s2_zip")
+    # эффект уже удалённого исправления остался бы «запечён» в чекпоинте al_ckpt,
+    # и стирание выглядело бы так, будто ничего не изменилось.
+    _RESET_AL_KEYS = ("al_after", "al_ckpt", "al_version", "corr_s2_zip")
     _del_col1, _del_col2, _del_col3 = st.columns([3, 1, 1])
     with _del_col1:
         _del_labels = {
@@ -581,17 +581,15 @@ else:
                     base, mask_for_export, existing_corrections, n=n_anchors,
                 ) if n_anchors else []
                 version = st.session_state.get("al_version", 0) + 1
-                prev_ckpt = st.session_state.get("al_ckpt")        # накопительно
-                prev_bg = st.session_state.get("al_bg_ckpt")       # накопительно
-                ckpt, bg_ckpt, report = al.retrain_and_save(
+                prev_ckpt = st.session_state.get("al_ckpt")        # накопительно, обе головы разом
+                ckpt, report = al.retrain_and_save(
                     str(image_path), corr_items + anchor_items,
                     version=version, from_ckpt=prev_ckpt,
-                    bg_items=bg_items + bg_anchor_items, from_bg_ckpt=prev_bg,
+                    bg_items=bg_items + bg_anchor_items,
                 )
-                new_result = al.reanalyze(str(image_path), ckpt, bg_ckpt)
+                new_result = al.reanalyze(str(image_path), ckpt)
             st.session_state["al_version"] = version
             st.session_state["al_ckpt"] = ckpt
-            st.session_state["al_bg_ckpt"] = bg_ckpt
             st.session_state["al_after"] = {"result": new_result, "report": report}
             # Перерисовываем ВСЮ страницу дообученной моделью: первая фотка,
             # класс руды и проценты вверху пересчитаются (al_active → result).
@@ -607,9 +605,16 @@ if al_active:
         f"(фон {_bg['label_counts']['фон']} / руда {_bg['label_counts']['руда']})."
         if _bg else ""
     )
+    # num_patches/train_acc сорта есть в отчёте, только если в этом раунде были
+    # правки/якоря по сорту руды — раунд «только фон» (пустой n_anchors + одна
+    # правка «это фон») их не даёт, голова сорта тогда не переобучалась.
+    _grade_msg = (
+        f"на {_rep['num_patches']} патчах ({_rep['num_feature_vectors']} примеров), "
+        f"train-acc {_rep['train_acc']}."
+        if "num_patches" in _rep else "(голова сорта не переобучалась в этом раунде)."
+    )
     st.success(
-        f"Дообучено (v{st.session_state.get('al_version')}) на {_rep['num_patches']} "
-        f"патчах ({_rep['num_feature_vectors']} примеров), train-acc {_rep['train_acc']}.{_bg_msg} "
+        f"Дообучено (v{st.session_state.get('al_version')}) {_grade_msg}{_bg_msg} "
         "Первая фотка вверху страницы, класс руды и все проценты уже пересчитаны."
     )
     _bcol, _acol = st.columns(2)
@@ -621,14 +626,15 @@ if al_active:
         st.image(overlay, use_container_width=True)
 
     # (а) Сохранённый чекпоинт активного обучения: путь на диске + скачивание.
+    # Один файл — encoder+head(сорт)+bg_head(фон) вместе, ORE_ML_CKPT подключает обе головы.
     _ckpt_path = st.session_state.get("al_ckpt")
     if _ckpt_path and Path(_ckpt_path).exists():
         _sz = Path(_ckpt_path).stat().st_size / 1e6
         st.caption(
-            f"💾 Чекпоинт сохранён на диск: `{_ckpt_path}` ({_sz:.0f} МБ). "
-            "Подключить как модель по умолчанию: переменная окружения "
-            "`ORE_ML_CKPT=<путь>`. Дообучение накопительное — каждый запуск "
-            "стартует с этой версии."
+            f"💾 Мультиголовый чекпоинт (сорт + фон) сохранён на диск: `{_ckpt_path}` "
+            f"({_sz:.0f} МБ). Подключить как модель по умолчанию: переменная окружения "
+            "`ORE_ML_CKPT=<путь>` (больше ничего задавать не нужно — фон внутри того "
+            "же файла). Дообучение накопительное — каждый запуск стартует с этой версии."
         )
         # Чтение .pth (~сотня МБ) — только по явному запросу, не на каждый rerun.
         if st.checkbox("Подготовить дообученный чекпоинт к скачиванию (.pth)"):
@@ -641,6 +647,6 @@ if al_active:
                 )
 
     if st.button("↩️ Сбросить дообучение (вернуться к базовой модели)"):
-        for _k in ("al_after", "al_ckpt", "al_bg_ckpt", "al_version"):
+        for _k in ("al_after", "al_ckpt", "al_version"):
             st.session_state.pop(_k, None)
         st.rerun()
