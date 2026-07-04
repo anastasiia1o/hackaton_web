@@ -690,6 +690,16 @@ def _effective_patch_size(image: Image.Image) -> int:
     return int(max(48, min(config.PATCH_SIZE, short // 4)))
 
 
+def _majority_trainable_class(mask: np.ndarray) -> Optional[int]:
+    """Обучаемый класс с наибольшей залитой площадью в маске (или None)."""
+    best, best_n = None, 0
+    for cid in ac.TRAINABLE_CLASS_IDS:
+        n = int(np.count_nonzero(mask == cid))
+        if n > best_n:
+            best, best_n = cid, n
+    return best
+
+
 def export_active_learning_patch(
     dataset_id: str,
     *,
@@ -744,14 +754,7 @@ def export_active_learning_patch(
                 S = int(patch_size or _effective_patch_size(roi_image))
                 seed = int(uuid.uuid5(uuid.NAMESPACE_URL, region_id).int % (2**32))
 
-                for cid in ac.TRAINABLE_CLASS_IDS:
-                    m = mask == cid
-                    if not m.any():
-                        continue
-                    patches, reason = qz.quantize_region(
-                        m, roi_image, cid, S=S, tau=tau, overlap=overlap,
-                        N=cap_n, seed=seed + cid,
-                    )
+                def _emit(cid: int, patches: list, reason: str) -> None:
                     if reason not in ("ok", "thin_region"):
                         summary["skipped_reasons"][reason] = \
                             summary["skipped_reasons"].get(reason, 0) + 1
@@ -770,6 +773,31 @@ def export_active_learning_patch(
                             "upsampled": int(p.upsampled),
                             "source_size": p.source_size,
                         })
+
+                # Кадр ≈ одно train-FOV → это ОДИН обучающий пример: берём
+                # МАЖОРИТАРНЫЙ обучаемый класс (наибольшая площадь) и кладём кадр
+                # целиком. Так вырожденный случай (в т.ч. смесь 2-3 классов в
+                # маленьком кадре) даёт один патч = ту же картинку под мажор-класс,
+                # а не набор конфликтующих полукадров.
+                if max(roi_image.size) <= round(1.5 * S):
+                    maj = _majority_trainable_class(mask)
+                    if maj is not None:
+                        patches, reason = qz.quantize_region(
+                            mask == maj, roi_image, maj, S=S, tau=tau,
+                            overlap=overlap, N=cap_n, seed=seed + maj,
+                        )
+                        _emit(maj, patches, reason)
+                    continue
+
+                for cid in ac.TRAINABLE_CLASS_IDS:
+                    m = mask == cid
+                    if not m.any():
+                        continue
+                    patches, reason = qz.quantize_region(
+                        m, roi_image, cid, S=S, tau=tau, overlap=overlap,
+                        N=cap_n, seed=seed + cid,
+                    )
+                    _emit(cid, patches, reason)
 
     result = de.write_imagefolder(edir, records, classes_json)
     result["export_id"] = export_id

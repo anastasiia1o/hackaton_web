@@ -104,6 +104,27 @@ def _quantize_region(
     tau = float(min(max(tau, 0.0), 1.0))
     rng = np.random.default_rng(int(seed) & 0xFFFFFFFF)
 
+    # ── Вырожденный случай: кадр ≈ одно train-FOV ────────────────────────────
+    # Если сам кадр по стороне не больше ~1.5·S, то это уже ОДИН обучающий
+    # пример, а не поле для нарезки. Возвращаем кадр ЦЕЛИКОМ:
+    #   • картинка ровно S×S, залитая одним классом → та же картинка (resize
+    #     S→S тождественен), никаких кропов/искажений;
+    #   • картинка меньше S → один раз апскейлим до S (без дробления).
+    # Так гарантируется устойчивость, о которой договаривались (см. §5 патча).
+    H, W = M.shape
+    if max(W, H) <= round(1.5 * S):
+        inside = float(M.sum()) / float(W * H)
+        if inside >= min(tau, 0.5):        # класс покрывает бОльшую часть кадра
+            crop = image.convert("RGB")
+            upsampled = crop.size != (S, S)
+            if upsampled:
+                crop = crop.resize((S, S), Image.BILINEAR)
+            return [Patch(
+                image=crop, label=L, weight=1.0 if not upsampled else 0.75,
+                inside=min(inside, 1.0), upsampled=upsampled,
+                x=0, y=0, source_size=max(W, H),
+            )], "ok"
+
     # 1) Отодвигаемся от границы с соседним классом: работаем по «ядру» области.
     margin = int(S * (1.0 - tau) / 2)
     core = _erode(M, margin) if margin > 0 else M
