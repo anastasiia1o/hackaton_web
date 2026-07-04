@@ -192,3 +192,32 @@ print(errors)   # пустой список = всё по контракту
 Обратная совместимость с v1 сохранена — пиксельный ML без `patch_grid` остаётся
 валидным (только предупреждение). Любое изменение согласуется через
 `orevision-app/docs/coordination/HANDOFF.md` и правку `API_CONTRACT.md`.
+
+---
+
+## 9. Реальный сервис уже в репозитории: `ml_service/`
+
+Референсная реализация ML-стороны контракта поверх **настоящей** модели
+`grade_unfreeze_best.pth` (se_resnext50_32x4d / MicroNet, macro-F1 = 0.944) лежит
+в [`ml_service/`](../ml_service/README.md). Это готовый `POST /analyze` +
+`GET /health`, отдающий JSON строго по этому гайду (contract v2).
+
+Сопоставление выходов модели (3 сорта) с кодами классов контракта:
+
+| выход модели | сорт руды        | код класса |
+|-------------|------------------|------------|
+| 0 talc      | Оталькованная    | **3** тальк |
+| 1 ordinary  | Рядовая          | **1** обычные срастания |
+| 2 fine      | Труднообогатимая | **2** тонкие срастания  |
+
+Запуск:
+
+```bash
+pip install -r ml_service/requirements.txt     # torch и пр. (ставится отдельно)
+python ml_service/server.py                     # :8001
+OREVISION_ML_MODE=real streamlit run app.py     # сайт в real-режиме
+```
+
+Форма ответа проверяется без установки torch: `python ml_service/test_contract_shape.py`
+(прогоняет ответ через `validate_ml_response` и весь пайплайн сайта). Подробности —
+`ml_service/README.md`.

@@ -1,0 +1,21 @@
+# Зависимости РЕАЛЬНОГО ML-сервиса (orevision-ml). Ставятся ОТДЕЛЬНО от сайта —
+# сам сайт в mock-режиме их не требует.
+#
+#   pip install -r ml_service/requirements.txt
+#
+# torch — тяжёлый; для CPU-инференса достаточно CPU-сборки:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+torch>=2.0.0
+torchvision>=0.15.0
+# Модель обучалась на smp 0.2.1, но тот пин тянет timm==0.4.12, несовместимый с
+# torch 2.x (импортирует удалённый torch._six). Энкодер se_resnext50_32x4d и
+# структура ключей в smp 0.3.x те же — чекпоинт грузится без правок (проверено:
+# grade_unfreeze_best.pth -> smp 0.3.4 + torch 2.12, панорама 10.jpg воспроизводит
+# эталон ML-команды: тальк 24.6% / рядовые 1.9% / тонкие 73.5%).
+segmentation-models-pytorch>=0.3,<0.4
+pretrainedmodels
+Pillow>=9.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+Flask>=3.0.0
