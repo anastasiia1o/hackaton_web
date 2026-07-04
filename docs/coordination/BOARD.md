@@ -75,6 +75,14 @@
   без отдельной кнопки-подтверждения, удаление крестиком рядом с выбором
   шлифа, ПКМ отменяет лассо-выделение (общий компонент), таблица и экспорт
   переименованы по-человечески, читаемые имена экспорта — stream-a/al-page-ux-polish
+- [DONE] (A, по прямой просьбе — см. HANDOFF) Переход на patch-classification
+  (docs/PATCH_AL_REDESIGN.md): контракт v2 (блочная маска + `patch_grid`),
+  `schemas.PatchGrid`, валидация `patch_grid`, mock отдаёт patch_grid, единое
+  пространство id разметки (= коды контракта), новые `src/quantizer.py` и
+  `src/active_query.py`, ImageFolder-экспорт патчей
+  (`dataset_export.write_imagefolder` + `dataset_storage.export_active_learning_patch`),
+  третий вариант экспорта на странице разметки. 88 тестов зелёных (+21) —
+  stream-a/patch-al-redesign
 
 ## Интеграция / упаковка
 

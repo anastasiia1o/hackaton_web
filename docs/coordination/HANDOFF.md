@@ -601,3 +601,55 @@ Streamlit, я на связи.
 и подтверждено.
 
 Действие от другого потока: не требуется.
+
+## 2026-07-04 — A — Контракт v2: patch-classification (блочная маска + patch_grid)
+
+Что решено (реализация docs/PATCH_AL_REDESIGN.md): переход на модель, которая
+классифицирует не пиксели, а квадратные ПАТЧИ train-разрешения.
+
+SEAM (`src/schemas.py`): добавлен dataclass `PatchGrid`
+(`tile/stride/rows/cols/origin/labels_path/conf_path`) и опциональное поле
+`MLResponse.patch_grid` (+ разбор в `from_json`). Изменение аддитивное — старые
+потребители полей `mask/metrics/classification` работают без правок.
+
+Контракт (`API_CONTRACT.md` → **v2**, `config.CONTRACT_VERSION="v2"`): `mask`
+теперь БЛОЧНАЯ (сетка патч-классов, апскейл nearest до image_size — для
+`metrics.py`/`classification.py` неотличима от пиксельной, они НЕ менялись).
+Добавлено поле `patch_grid` (сырой квантованный вывод). Отсутствие `patch_grid`
+— только предупреждение валидатора (обратная совместимость). `src/contract.py`:
+новая проверка `_validate_patch_grid` (размер labels == rows×cols, коды 0..4,
+и сверка mask == nearest-upsample(labels) для небольших сеток).
+
+`mock_ml/generator.py`: теперь квантует сгенерированную сцену в сетку патчей
+(преобладающий класс + средняя уверенность на ячейку), отдаёт БЛОЧНУЮ маску +
+grid_labels.png/grid_conf.png + patch_grid. objects[] пересобраны из компонент
+блочной маски. Все прежние сценарии/параметры (talc_fraction/noise/illumination)
+сохранены; тесты mock/contract зелёные.
+
+Единое пространство id (§3): `configs/annotation_classes.json` и
+`src/annotation_config.py` перекодированы под коды контракта (config.CLASS_*):
+0=фон, 1=обычные, 2=тонкие, 3=тальк, 4=неопределённая(=артефакт). Добавлены
+`ac.TRAINABLE_CLASS_IDS`, `ac.UNCERTAIN_ID`. **ВНИМАНИЕ B:** id классов разметки
+ИЗМЕНИЛИСЬ (раньше talc=1, теперь talc=3). UI берёт классы из `ac.load_classes()`,
+так что рендер не ломается, но ранее сохранённые на диске semantic_mask.png со
+старой кодировкой станут рассинхронизированы — для демо это неважно (data/ не в
+git), но учтите при чтении старой разметки.
+
+Новые модули (мои файлы): `src/quantizer.py` (область эксперта → перекрывающиеся
+патчи S×S, робастно, никогда не падает; scipy при наличии, есть numpy-фолбэк) и
+`src/active_query.py` (ранжирование панорам/регионов по неуверенности/границам
+классов, worklist, авто-`needs_expert_review`).
+
+Экспорт: `dataset_export.write_imagefolder()` + `dataset_storage.
+export_active_learning_patch()` — новый ImageFolder-формат
+(`imgs/<класс>/*.jpg` + manifest.csv с весами/provenance + classes.json),
+детерминированный (сид от region_id). semantic_mask.png на диске оставлен как
+есть (не рвал рабочее хранилище) — патчи квантуются из него на экспорте.
+
+Что это меняет для другого потока: `pages/2_Разметка_эксперта.py` — добавил
+ТРЕТИЙ вариант экспорта «Патчи для patch-модели (ImageFolder + weights)» (radio,
+аддитивно). Больше в UI/app.py я не лез. Тесты: 88 зелёных (pytest), +21 новых
+(quantizer 9, active_query 6, contract 3, dataset_export 2, annotation_config 1).
+
+Действие от другого потока: учесть новую кодировку id разметки; при желании —
+overlay блок-предсказаний модели из `patch_grid` на вьювере (мой контракт готов).
