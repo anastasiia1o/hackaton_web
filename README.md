@@ -34,7 +34,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 4. Запустить сайт
-streamlit run app.py
+streamlit run OreVision.py
 ```
 
 Откроется браузер на `http://localhost:8501`. Нажмите
@@ -61,7 +61,7 @@ pytest -q
 
 ```powershell
 $env:OREVISION_ML_MODE = "real"      # включить реальный режим
-streamlit run app.py
+streamlit run OreVision.py
 ```
 
 Контракт запроса/ответа описан в [`API_CONTRACT.md`](API_CONTRACT.md).
@@ -82,7 +82,7 @@ docker compose up --build
 `docker compose down`.
 
 **Если Docker не работает или не успеваете** — это не блокер. Показывайте
-demo обычным `streamlit run app.py` из раздела 1. Он не хуже для жюри.
+demo обычным `streamlit run OreVision.py` из раздела 1. Он не хуже для жюри.
 
 ---
 
@@ -90,7 +90,7 @@ demo обычным `streamlit run app.py` из раздела 1. Он не ху
 
 ```
 orevision-app/
-├── app.py                  # Streamlit: главный экран (поток B)
+├── OreVision.py                  # Streamlit: главный экран (поток B)
 ├── batch_process.py        # пакетная обработка серии изображений (CLI)
 ├── pages/                  # многостраничность Streamlit (поток B)
 │   ├── 1_Пакетная_обработка.py     # очередь импорта (папка/файлы через проводник) + batch
@@ -154,7 +154,7 @@ orevision-app/
 `stream-a/<задача>` — ветки логики, `stream-b/<задача>` — ветки UI.
 Прямо в `main` не коммитим.
 
-**Как двое не мешают друг другу:** поток A правит `src/`, поток B — `app.py`/`ui/`.
+**Как двое не мешают друг другу:** поток A правит `src/`, поток B — `OreVision.py`/`ui/`.
 Общая точка — `src/schemas.py` (менять только через запись в `HANDOFF.md`).
 Задачи и статусы — в `docs/coordination/BOARD.md`, решения — в `HANDOFF.md`.
 

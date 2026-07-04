@@ -1,16 +1,16 @@
 """
 OreVision — локальный веб-интерфейс (Streamlit).
 
-Запуск (Windows PowerShell, из корня репозитория, при активном .venv):
-    streamlit run app.py
+Запуск (из корня репозитория, при активном окружении):
+    streamlit run OreVision.py
 Затем открыть в браузере:  http://localhost:8501
 
 Это ГЛАВНЫЙ экран сквозного сценария:
-    загрузка изображения → анализ (ML) → overlay-маска + слои →
-    метрики → rule-based классификация → экспорт (CSV/JSON/PDF).
+    загрузка изображения → анализ (ML) → overlay-маска + слои → метрики →
+    rule-based классификация → ЭКСПОРТ ДАННЫХ → АКТИВНОЕ ОБУЧЕНИЕ (правки).
 
 Работает в MOCK-режиме без ML-сервиса (config.ML_MODE = "mock").
-Когда ML-команда поднимет сервис — переключаемся на "real" одной настройкой.
+Реальный ML подключается одной настройкой OREVISION_ML_MODE=real (см. ml_service/).
 """
 
 from __future__ import annotations
@@ -147,16 +147,11 @@ if image_path is None:
     st.info("Загрузите изображение или нажмите «Показать на демо-образце».")
     st.stop()
 
-# --- Предупреждение о размере панорамы -------------------------------------
+# Размер оригинала нужен дальше (координаты исправлений считаем в его пикселях).
+# Ограничения на размер фотографии НЕТ — гигапиксельные панорамы поддерживаются
+# (для показа кадр уменьшается во вьювере, разметка идёт в долях 0..1).
 with Image.open(image_path) as im:
     w, h = im.size
-if max(w, h) > config.MAX_DIMENSION_WARN:
-    st.warning(
-        f"Большое панорамное изображение ({w}×{h}). Для показа оно уменьшается "
-        f"до {viewer.DISPLAY_MAX_DIM}px по большей стороне, но zoom/pan во вьюере "
-        f"работают на стороне браузера. Полностайловая загрузка исходного "
-        f"разрешения — в разработке (поток B)."
-    )
 
 # --- Запуск анализа (кэшируется — см. _cached_run_analysis) -----------------
 params = {"scenario": scenario} if scenario else None
@@ -233,23 +228,101 @@ with col_metrics:
         for wmsg in result.ml.warnings:
             st.warning(wmsg)
 
-# --- Инспектор участка: просмотр в высоком разрешении + быстрая коррекция ---
-# Один и тот же выделенный участок используется и для просмотра, и для правки
-# (раньше это были два отдельных лассо в двух разных местах страницы —
-# сводили с ума необходимостью обводить одну и ту же область дважды).
-st.divider()
-st.subheader("🔬 Инспектор участка")
-st.caption(
-    "Обведите область мышью замкнутой линией (не обязательно прямоугольником). "
-    "Дальше можно посмотреть её в высоком разрешении и/или сразу указать "
-    "верный класс — исправление сохранится для дообучения (active learning)."
-)
-
+# Маска в разрешении показа — нужна и для экспорта, и для активного обучения.
 mask_for_export = mask
 if mask_for_export.shape[:2] != (base.size[1], base.size[0]):
     mask_for_export = np.array(
         Image.fromarray(mask_for_export, mode="L").resize(base.size, Image.NEAREST), dtype=np.uint8
     )
+
+# ===========================================================================
+# 1) ЭКСПОРТ ДАННЫХ  (сразу после инференса — первое, что видит геолог)
+# ===========================================================================
+st.divider()
+st.subheader("📤 Экспорт данных")
+
+# Сохраняем overlay в PNG (для PDF и для скачивания).
+overlay_png = storage.result_dir(str(image_path)) / "overlay.png"
+overlay.convert("RGB").save(overlay_png)
+
+exp_col1, exp_col2, exp_col3, exp_col4, exp_col5 = st.columns(5)
+
+with exp_col1:
+    st.download_button(
+        "Скачать CSV",
+        data=reports.csv_bytes(result),
+        file_name=f"{image_path.stem}_metrics.csv",
+        mime="text/csv",
+    )
+with exp_col2:
+    import json
+    st.download_button(
+        "Скачать JSON",
+        data=json.dumps(result.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name=f"{image_path.stem}_result.json",
+        mime="application/json",
+    )
+with exp_col3:
+    with open(overlay_png, "rb") as f:
+        st.download_button(
+            "Скачать маску (PNG)",
+            data=f.read(),
+            file_name=f"{image_path.stem}_overlay.png",
+            mime="image/png",
+        )
+with exp_col4:
+    st.download_button(
+        "Скачать GeoJSON",
+        data=gis_export.geojson_bytes(result),
+        file_name=f"{image_path.stem}_objects.geojson",
+        mime="application/geo+json",
+        help="Объекты (включения) как GeoJSON — для ГИС/QGIS.",
+    )
+with exp_col5:
+    # PDF формируем сразу (как остальные кнопки): анализ кэширован
+    # (_cached_run_analysis), поэтому одна кнопка — как у CSV/JSON/PNG/GeoJSON.
+    pdf_path = reports.export_pdf(result, overlay_png=overlay_png)
+    with open(pdf_path, "rb") as f:
+        st.download_button(
+            "Скачать PDF",
+            data=f.read(),
+            file_name=f"{image_path.stem}_report.pdf",
+            mime="application/pdf",
+        )
+
+# --- Второй вариант сохранения: как датасет (структура папок как в S2_v2) ---
+st.markdown("**Вариант сохранения «как датасет» (imgs / masks / masks_colored / masks_human)**")
+st.caption(
+    "Тот же результат, но в виде папок imgs/masks/masks_colored/masks_human — "
+    "структура приблизительно как в примере датасета S2_v2."
+)
+with tempfile.TemporaryDirectory() as _tmp:
+    _bundle_dir = Path(_tmp) / "bundle"
+    dataset_export.export_s2_bundle(
+        _bundle_dir,
+        items=[{"name": image_path.stem, "image": base, "mask": mask_for_export}],
+        class_colors=config.CLASS_COLORS, class_names=config.CLASS_NAMES,
+    )
+    _s2_zip_bytes = dataset_export.zip_directory(_bundle_dir)
+st.download_button(
+    "📦 Скачать в формате S2_v2 (ZIP)",
+    data=_s2_zip_bytes,
+    file_name=f"{image_path.stem}_s2v2.zip",
+    mime="application/zip",
+)
+
+# ===========================================================================
+# 2) АКТИВНОЕ ОБУЧЕНИЕ  (правка предсказания: зум + лассо в одном окне)
+# ===========================================================================
+st.divider()
+st.subheader("🎯 Активное обучение")
+st.caption(
+    "🔍 **Лупа** — выделите прямоугольник, область растянется на весь кадр; "
+    "**Сброс зума** возвращает полный вид. Переключатель **Оригинал/Оверлей** "
+    "показывает снимок или маску. ✎ **Лассо** — обведите неверно распознанную "
+    "область прямо на приближении и укажите верный класс: исправление уйдёт в "
+    "дообучение, и фронтенд засэмплит из него обучающие патчи (src/quantizer.py)."
+)
 
 corr_class = st.selectbox(
     "Верный класс участка (для сохранения исправления)",
@@ -258,8 +331,8 @@ corr_class = st.selectbox(
     format_func=lambda c: config.CLASS_NAMES[c],
 )
 r, g, b, _a = config.CLASS_COLORS.get(corr_class, (255, 210, 60, 90))
-insp_lasso = viewer.lasso_picker(
-    base, key="insp_lasso",
+insp_lasso = viewer.annotator(
+    overlay, key="al_annotator", original_image=base,
     color=f"rgba({r}, {g}, {b}, .30)", border_color=f"#{r:02x}{g:02x}{b:02x}",
 )
 
@@ -273,41 +346,11 @@ if insp_lasso is not None:
 
 comment = st.text_input("Комментарий (необязательно)", key="insp_comment")
 author = st.text_input("Автор", value="geolog", key="insp_author")
-
-view_col, save_col = st.columns(2)
-with view_col:
-    do_inspect = st.button("🔍 Показать в высоком разрешении", use_container_width=True)
-with save_col:
-    save_corr = st.button("💾 Сохранить исправление", type="primary", use_container_width=True)
-
-if do_inspect:
-    if insp_lasso is None:
-        st.warning("Сначала обведите область мышью замкнутой линией на изображении выше.")
-    else:
-        ins_x0, ins_y0, ins_x1, ins_y1 = insp_lasso["bbox"]
-        with st.spinner("Готовим участок в высоком разрешении…"):
-            crop, meta = viewer.crop_region_highres(
-                str(image_path), ins_x0, ins_y0, ins_x1, ins_y1
-            )
-        rx = meta["region_px_orig"]
-        st.image(
-            crop, use_container_width=True,
-            caption=(f"Участок оригинала {rx[2]}×{rx[3]} px @ ({rx[0]},{rx[1]}) → "
-                     f"показано {meta['shown_size'][0]}×{meta['shown_size'][1]} "
-                     f"(область — bounding box обведённой линии)"),
-        )
-        if meta["capped"]:
-            st.info(
-                f"Исходник очень большой ({meta['orig_size'][0]}×{meta['orig_size'][1]}) — "
-                f"для инспекции понижен (масштаб {meta['native_scale']}), чтобы уложиться "
-                f"в память. Участок всё равно детальнее обзора."
-            )
-        else:
-            st.success("Участок показан в нативном разрешении.")
+save_corr = st.button("💾 Сохранить исправление", type="primary")
 
 if save_corr:
     if insp_lasso is None:
-        st.warning("Сначала обведите область мышью замкнутой линией на изображении выше.")
+        st.warning("Сначала обведите область лассо на изображении выше.")
     else:
         corr_x0, corr_y0, corr_x1, corr_y1 = insp_lasso["bbox"]
         px0, py0 = int(corr_x0 * w), int(corr_y0 * h)
@@ -376,82 +419,3 @@ if existing_corrections:
             data=_corr_zip, file_name=f"{image_path.stem}_corrections_s2v2.zip",
             mime="application/zip",
         )
-
-# --- Экспорт ----------------------------------------------------------------
-st.divider()
-st.subheader("Экспорт результатов")
-
-# Сохраняем overlay в PNG (для PDF и для скачивания).
-overlay_png = storage.result_dir(str(image_path)) / "overlay.png"
-overlay.convert("RGB").save(overlay_png)
-
-exp_col1, exp_col2, exp_col3, exp_col4, exp_col5 = st.columns(5)
-
-with exp_col1:
-    st.download_button(
-        "Скачать CSV",
-        data=reports.csv_bytes(result),
-        file_name=f"{image_path.stem}_metrics.csv",
-        mime="text/csv",
-    )
-with exp_col2:
-    import json
-    st.download_button(
-        "Скачать JSON",
-        data=json.dumps(result.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name=f"{image_path.stem}_result.json",
-        mime="application/json",
-    )
-with exp_col3:
-    with open(overlay_png, "rb") as f:
-        st.download_button(
-            "Скачать маску (PNG)",
-            data=f.read(),
-            file_name=f"{image_path.stem}_overlay.png",
-            mime="image/png",
-        )
-with exp_col4:
-    st.download_button(
-        "Скачать GeoJSON",
-        data=gis_export.geojson_bytes(result),
-        file_name=f"{image_path.stem}_objects.geojson",
-        mime="application/geo+json",
-        help="Объекты (включения) как GeoJSON — для ГИС/QGIS.",
-    )
-with exp_col5:
-    # Формируем PDF сразу же (как остальные кнопки), а не по отдельному клику:
-    # раньше здесь была цепочка "нажми Сформировать -> нажми Скачать", и на
-    # каждый клик ЛЮБОЙ кнопки на странице анализ пересчитывался заново, из-за
-    # чего казалось, что следующая кнопка не срабатывает, пока не нажмёшь
-    # предыдущую. Теперь результат кэширован (_cached_run_analysis) и PDF
-    # готов сразу — одна кнопка, как у CSV/JSON/PNG/GeoJSON.
-    pdf_path = reports.export_pdf(result, overlay_png=overlay_png)
-    with open(pdf_path, "rb") as f:
-        st.download_button(
-            "Скачать PDF",
-            data=f.read(),
-            file_name=f"{image_path.stem}_report.pdf",
-            mime="application/pdf",
-        )
-
-# --- Второй вариант сохранения: как датасет (структура папок как в S2_v2) ---
-st.markdown("**Вариант сохранения «как датасет» (imgs / masks / masks_colored / masks_human)**")
-st.caption(
-    "Тот же результат, но в виде папок imgs/masks/masks_colored/masks_human — "
-    "структура приблизительно как в примере датасета S2_v2."
-)
-with tempfile.TemporaryDirectory() as _tmp:
-    _bundle_dir = Path(_tmp) / "bundle"
-    dataset_export.export_s2_bundle(
-        _bundle_dir,
-        items=[{"name": image_path.stem, "image": base, "mask": mask_for_export}],
-        class_colors=config.CLASS_COLORS, class_names=config.CLASS_NAMES,
-    )
-    _s2_zip_bytes = dataset_export.zip_directory(_bundle_dir)
-st.download_button(
-    "📦 Скачать в формате S2_v2 (ZIP)",
-    data=_s2_zip_bytes,
-    file_name=f"{image_path.stem}_s2v2.zip",
-    mime="application/zip",
-)
-

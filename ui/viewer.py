@@ -455,6 +455,13 @@ _lasso_picker_component = components.declare_component(
     "orevision_lasso_picker", path=str(_LASSO_PICKER_DIR)
 )
 
+# Аннотатор с зумом (интерфейс в духе GUI matplotlib): прямоугольный зум +
+# переключение слоя оригинал/оверлей + обводка лассо в ОДНОМ полотне.
+_ANNOTATOR_DIR = Path(__file__).resolve().parent / "annotator_frontend"
+_annotator_component = components.declare_component(
+    "orevision_annotator", path=str(_ANNOTATOR_DIR)
+)
+
 
 def lasso_picker(
     image: Image.Image,
@@ -483,6 +490,49 @@ def lasso_picker(
         src=src,
         width=image.width, height=image.height,
         committed=committed or [],
+        color=color, border_color=border_color,
+        key=key, default=None,
+    )
+    if not isinstance(value, dict) or not value.get("points") or len(value["points"]) < 3:
+        return None
+    try:
+        pts = [(float(x), float(y)) for x, y in value["points"]]
+        bbox = tuple(float(v) for v in value["bbox"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {"points": pts, "bbox": bbox}
+
+
+def annotator(
+    overlay_image: Image.Image,
+    key: str,
+    original_image: Image.Image | None = None,
+    committed: list[dict] | None = None,
+    tool: str = "lasso",
+    color: str = "rgba(255, 210, 60, .30)",
+    border_color: str = "#ffcf33",
+) -> Optional[dict]:
+    """
+    Аннотатор с зумом (интерфейс как в GUI matplotlib) — расширение lasso_picker.
+
+    Одно полотно: панель сверху переключает показ (оригинал/оверлей) и
+    инструмент (прямоугольный зум / обводка лассо), приближённая область
+    растягивается на весь кадр. Разметка и committed рисуются в тех же
+    координатах, что и картинка, поэтому обводить можно ПРЯМО НА ПРИБЛИЖЕНИИ.
+
+    Возвращает то же, что lasso_picker — {"points": [...], "bbox": (...)} в долях
+    0..1 от ПОЛНОГО изображения (или None) — downstream-код (majority_class_in_
+    polygon, отрисовка маски) не меняется. `original_image` необязателен: без
+    него переключатель показывает тот же оверлей.
+    """
+    overlay_src = _to_data_uri(overlay_image)
+    original_src = _to_data_uri(original_image) if original_image is not None else overlay_src
+    value = _annotator_component(
+        overlay_src=overlay_src,
+        original_src=original_src,
+        width=overlay_image.width, height=overlay_image.height,
+        committed=committed or [],
+        tool=tool if tool in ("lasso", "zoom") else "lasso",
         color=color, border_color=border_color,
         key=key, default=None,
     )

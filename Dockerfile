@@ -27,5 +27,5 @@ ENV OREVISION_ML_MODE=mock \
 EXPOSE 8501
 
 # Запуск сайта, доступного снаружи контейнера.
-CMD ["streamlit", "run", "app.py", \
+CMD ["streamlit", "run", "OreVision.py", \
      "--server.address=0.0.0.0", "--server.port=8501", "--server.headless=true"]

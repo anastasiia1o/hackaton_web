@@ -23,11 +23,11 @@ from src import annotation_config as ac
 from src import config, dataset_export as de, dataset_storage as ds, event_log as ev
 from ui import file_pickers, viewer
 
-st.set_page_config(page_title="OreVision — Разметка эксперта", page_icon="🖌️", layout="wide")
+st.set_page_config(page_title="OreVision — Активное обучение", page_icon="🖌️", layout="wide")
 config.ensure_dirs()
 Image.MAX_IMAGE_PIXELS = None
 
-st.title("🖌️ Разметка эксперта")
+st.title("🖌️ Активное обучение")
 st.caption(
     "Обведите мышью произвольную область на шлифе (замкнутая линия, не "
     "обязательно прямоугольник; правая кнопка мыши — отменить выделение), "
@@ -213,13 +213,18 @@ for s in st.session_state[draft_key]:
 
 # --- Выделение + подпись ------------------------------------------------------
 st.subheader("Выделение участка")
+st.caption(
+    "🔍 **Лупа** — выделите прямоугольник, и область растянется на весь кадр; "
+    "**Сброс зума** возвращает полный вид. ✎ **Лассо** — обведите область прямо "
+    "на приближении. Кнопкой ниже можно залить классом **всю картинку** целиком."
+)
 lasso_key = f"al_lasso_{draft_key}_{st.session_state[f'al_lasso_nonce_{draft_key}']}"
-pending = viewer.lasso_picker(
-    disp, key=lasso_key, committed=committed,
+pending = viewer.annotator(
+    disp, key=lasso_key, original_image=disp, committed=committed,
     color="rgba(255, 210, 60, .30)", border_color="#ffcf33",
 )
 
-pick_col, note_col, add_col = st.columns([2, 3, 1])
+pick_col, note_col, add_col, fill_col = st.columns([2, 3, 1, 1])
 with pick_col:
     class_options = [c.id for c in labeled_classes]
     pick_class = st.selectbox(
@@ -231,6 +236,9 @@ with note_col:
 with add_col:
     st.write("")
     add_clicked = st.button("➕ Добавить", disabled=pending is None)
+with fill_col:
+    st.write("")
+    fill_clicked = st.button("🪣 Залить всё", help="Пометить этим классом всю картинку целиком")
 
 if add_clicked and pending is not None:
     st.session_state[draft_key].append({
@@ -239,8 +247,18 @@ if add_clicked and pending is not None:
     })
     st.session_state[f"al_lasso_nonce_{draft_key}"] += 1
     st.rerun()
+elif fill_clicked:
+    # Заливка всей картинки: прямоугольник во весь кадр (доли 0..1). Так
+    # эксперт одним кликом ставит класс всему шлифу — при экспорте фронтенд
+    # засэмплит из этого патчи (см. src/quantizer.py).
+    st.session_state[draft_key].append({
+        "points": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        "class_id": pick_class, "note": note,
+    })
+    st.session_state[f"al_lasso_nonce_{draft_key}"] += 1
+    st.rerun()
 elif pending is None:
-    st.caption("Обведите область мышью на изображении выше, затем нажмите «Добавить».")
+    st.caption("Обведите область (или нажмите «Залить всё»), затем «Добавить».")
 
 # --- Список размеченных участков: исходный класс → класс эксперта ------------
 st.subheader(f"Размеченные участки ({len(st.session_state[draft_key])})")

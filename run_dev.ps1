@@ -16,4 +16,4 @@ Write-Host "Устанавливаю зависимости ..." -ForegroundColo
 pip install -r requirements.txt
 
 Write-Host "Запускаю OreVision на http://localhost:8501 ..." -ForegroundColor Green
-streamlit run app.py
+streamlit run OreVision.py

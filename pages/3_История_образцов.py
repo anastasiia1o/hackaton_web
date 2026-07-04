@@ -1,11 +1,11 @@
 """
-СТРАНИЦА «История и лог» (поток B).
+СТРАНИЦА «История образцов».
 
 Читает общий журнал анализов data/results/analysis_log.jsonl (его пишет
 reports.export_all — по одной строке на каждый обработанный образец) и
 показывает историю: таблицу, распределение по классам, фильтр и выгрузку.
 
-Только чтение готового лога — никакой логики потока A здесь нет.
+Только чтение готового лога.
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ import streamlit as st
 
 from src import config
 
-st.set_page_config(page_title="OreVision — История и лог", page_icon="📜", layout="wide")
+st.set_page_config(page_title="OreVision — История образцов", page_icon="📜", layout="wide")
 config.ensure_dirs()
 
-st.title("📜 История и лог анализов")
+st.title("📜 История образцов")
 st.caption(
     "Все запуски анализа (одиночные и пакетные) фиксируются в общий журнал — "
     "для воспроизводимости и аудита. Ниже — история, новые записи сверху."

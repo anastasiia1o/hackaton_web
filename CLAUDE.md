@@ -16,7 +16,7 @@
 `src/`, `mock_ml/`, `tests/`, `API_CONTRACT.md`, `docs/ML_INTEGRATION_GUIDE.md`.
 
 ## Чужие файлы (НЕ трогать — это поток B, сокомандник)
-`app.py`, `ui/`. Если нужно новое поле для UI — не лезь в UI, а добавь его в
+`OreVision.py`, `ui/`. Если нужно новое поле для UI — не лезь в UI, а добавь его в
 `src/schemas.py` и опиши изменение в `docs/coordination/HANDOFF.md`.
 
 ## Правило SEAM
@@ -29,7 +29,7 @@
    НИКОГДА не коммить прямо в `main`.
 3. Делай изменения только в своих файлах (см. выше).
 4. Перед коммитом прогони проверки и держи их зелёными:
-   - `python -m py_compile app.py batch_process.py src/*.py ui/*.py mock_ml/*.py`
+   - `python -m py_compile OreVision.py batch_process.py src/*.py ui/*.py mock_ml/*.py`
    - тесты: если установлен pytest — `pytest -q`; иначе запусти тестовые
      функции из `tests/` вручную скриптом.
 5. Коммить маленькими понятными коммитами и пушь:
@@ -46,4 +46,4 @@
 - Спрашивай подтверждение перед разрушительными командами (force-push, reset --hard).
 
 ## Как запускать сайт (для проверки)
-`streamlit run app.py` → открыть http://localhost:8501.
+`streamlit run OreVision.py` → открыть http://localhost:8501.
