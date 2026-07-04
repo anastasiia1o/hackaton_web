@@ -46,6 +46,7 @@ from pathlib import Path
 import numpy as np
 
 from .model import (
+    DEFAULT_BG_CKPT,
     DEFAULT_CKPT,
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -543,6 +544,108 @@ def quick_finetune(
         "final_loss": round(losses[-1], 4),
         "train_acc": round(acc, 4),
         "class_counts": {MODEL_CLASS_NAMES[c]: counts[c] for c in range(3)},
+    }
+
+
+def _load_bg_head_trainable(from_bg_ckpt, dev):
+    """Обучаемая голова фона Linear(2048→1). Стартуем с существующего чекпоинта
+    (накопительно), либо со свежей инициализации, если его нет."""
+    torch = _torch()
+    import torch.nn as nn  # noqa: PLC0415
+
+    head = nn.Linear(2048, 1).to(dev)
+    if from_bg_ckpt and os.path.exists(from_bg_ckpt):
+        head.load_state_dict(torch.load(from_bg_ckpt, map_location=dev, weights_only=True))
+    else:
+        nn.init.normal_(head.weight, std=0.01)
+        nn.init.zeros_(head.bias)
+    return head
+
+
+def quick_finetune_bg(
+    items,
+    *,
+    encoder_ckpt: str = DEFAULT_CKPT,
+    from_bg_ckpt: str = DEFAULT_BG_CKPT,
+    save_ckpt: str,
+    epochs: int = 150,
+    lr: float = 5e-3,
+    augment_k: int = 6,
+    seed: int = 42,
+    log=print,
+) -> dict:
+    """
+    Дообучение ГОЛОВЫ ФОНА (Linear(2048→1)) на патчах эксперта. items:
+    [(PIL.Image, bg_label, weight)], где bg_label: 1 = фон, 0 = руда (НЕ фон).
+
+    Энкодер тот же замороженный, что и у сортовой модели, — эмбеддинги общие и
+    совместимы с инференсом. Голова стартует с вшитого `bg_head_best.pth`
+    (накопительно). Голова уверенная (даёт ~0.99), поэтому чтобы сдвинуть её
+    решение, дообучаем дольше (много эпох, полный батч на кешированных признаках)
+    и балансируем классы через pos_weight + повесовые множители сэмплов.
+    """
+    torch = _torch()
+    import torch.nn as nn  # noqa: PLC0415
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    dev = device()
+
+    # Энкодер для признаков: тот же frozen-encoder сортовой модели.
+    enc = _build_module().to(dev)
+    if encoder_ckpt and os.path.exists(encoder_ckpt):
+        enc.load_state_dict(torch.load(encoder_ckpt, map_location=dev, weights_only=True))
+    for p in enc.parameters():
+        p.requires_grad = False
+
+    feats, labels, weights = encode_features(enc, items, augment_k=augment_k, dev=dev, seed=seed)
+    if feats.shape[0] == 0:
+        raise ValueError("нет обучающих патчей для дообучения головы фона")
+    y = labels.to(dev).float()                      # bg_label 0/1
+    feats, weights = feats.to(dev), weights.to(dev)
+
+    n_pos = float((y > 0.5).sum())                  # фон
+    n_neg = float((y <= 0.5).sum())                 # руда
+    # pos_weight = neg/pos балансирует редкий класс; ограничим, чтобы не взорвать.
+    pw = min(20.0, max(0.05, (n_neg / n_pos) if n_pos > 0 else 1.0))
+    criterion = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor([pw], device=dev), reduction="none"
+    )
+
+    head = _load_bg_head_trainable(from_bg_ckpt, dev)
+    optimizer = torch.optim.Adam(head.parameters(), lr=lr, weight_decay=1e-4)
+
+    head.train()
+    losses = []
+    for _ep in range(1, epochs + 1):
+        optimizer.zero_grad()
+        logit = head(feats).squeeze(1)
+        loss = (criterion(logit, y) * weights).mean()
+        loss.backward()
+        optimizer.step()
+        losses.append(float(loss.item()))
+
+    head.eval()
+    with torch.no_grad():
+        prob = torch.sigmoid(head(feats).squeeze(1))
+        pred = (prob > 0.5).float()
+        acc = float((pred == y).float().mean())
+
+    Path(save_ckpt).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(head.state_dict(), str(save_ckpt))
+    log(f"✓ сохранён bg-чекпоинт {save_ckpt}  loss={losses[-1]:.4f}  train_acc={acc:.3f}")
+
+    return {
+        "save_ckpt": str(save_ckpt),
+        "from_bg_ckpt": from_bg_ckpt,
+        "num_patches": len(items),
+        "num_feature_vectors": int(feats.shape[0]),
+        "epochs": epochs,
+        "pos_weight": round(pw, 3),
+        "final_loss": round(losses[-1], 4),
+        "train_acc": round(acc, 4),
+        "label_counts": {"фон": int(n_pos), "руда": int(n_neg)},
     }
 
 

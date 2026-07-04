@@ -66,6 +66,89 @@ def build_correction_items(
     return items
 
 
+def build_bg_items(
+    image_path: str,
+    corrections: list[dict[str, Any]],
+    *,
+    weight: float = 1.0,
+) -> list[tuple[Image.Image, int, float]]:
+    """
+    Патчи для дообучения ГОЛОВЫ ФОНА из исправлений эксперта. bg_label:
+      - исправление на ФОН (код 0)        -> 1 (это фон),
+      - исправление на руду (коды 1/2/3)  -> 0 (это НЕ фон),
+      - артефакт (код 4)                  -> пропускаем (неоднозначно для фона).
+    Именно исправления «фон → руда» вытаскивают тайлы из-под маски фона.
+    """
+    from ui import viewer
+
+    items: list[tuple[Image.Image, int, float]] = []
+    for c in corrections:
+        rf = c.get("region_fraction")
+        cid = int(c.get("correct_class", 0))
+        if not rf or cid == config.CLASS_ARTIFACT:
+            continue
+        bg_label = 1 if cid == config.CLASS_BACKGROUND else 0
+        crop, _meta = viewer.crop_region_highres(
+            str(image_path), rf["x0"], rf["y0"], rf["x1"], rf["y1"],
+        )
+        items.append((crop, bg_label, weight))
+    return items
+
+
+def build_bg_anchor_items(
+    base_img: Image.Image,
+    base_mask: np.ndarray,
+    corrections: list[dict[str, Any]],
+    *,
+    n: int = 8,
+    tile_frac: float = 0.18,
+    weight: float = 0.3,
+    seed: int = 43,
+) -> list[tuple[Image.Image, int, float]]:
+    """
+    Якоря для головы фона: случайные тайлы, размеченные ТЕКУЩИМ предсказанием
+    (bg_label: 1 если мажоритарный класс тайла — фон, иначе 0), малый вес. Держат
+    в дообучении оба класса (фон/руда), чтобы правки не «схлопнули» всё в руду.
+    Тайлы внутри исправленных областей исключаются.
+    """
+    rng = random.Random(seed)
+    W, H = base_img.size
+    side = max(32, int(min(W, H) * tile_frac))
+
+    excl = []
+    for c in corrections:
+        rf = c.get("region_fraction")
+        if rf:
+            excl.append((rf["x0"] * W, rf["y0"] * H, rf["x1"] * W, rf["y1"] * H))
+
+    if base_mask.shape[:2] != (H, W):
+        base_mask = np.array(
+            Image.fromarray(base_mask.astype(np.uint8), mode="L").resize((W, H), Image.NEAREST),
+            dtype=np.uint8,
+        )
+
+    items: list[tuple[Image.Image, int, float]] = []
+    tries = 0
+    while len(items) < n and tries < n * 10:
+        tries += 1
+        x0 = rng.randint(0, max(0, W - side))
+        y0 = rng.randint(0, max(0, H - side))
+        cx, cy = x0 + side / 2, y0 + side / 2
+        if any(ex0 <= cx <= ex1 and ey0 <= cy <= ey1 for ex0, ey0, ex1, ey1 in excl):
+            continue
+        sub = base_mask[y0:y0 + side, x0:x0 + side]
+        if sub.size == 0:
+            continue
+        vals, counts = np.unique(sub, return_counts=True)
+        maj = int(vals[counts.argmax()])
+        if maj == config.CLASS_ARTIFACT:
+            continue
+        bg_label = 1 if maj == config.CLASS_BACKGROUND else 0
+        crop = base_img.crop((x0, y0, x0 + side, y0 + side))
+        items.append((crop, bg_label, weight))
+    return items
+
+
 def build_anchor_items(
     base_img: Image.Image,
     base_mask: np.ndarray,
@@ -128,27 +211,48 @@ def retrain_and_save(
     version: int,
     from_ckpt: Optional[str] = None,
     epochs: int = 60,
-) -> tuple[str, dict]:
+    bg_items: Optional[list[tuple[Image.Image, int, float]]] = None,
+    from_bg_ckpt: Optional[str] = None,
+    bg_epochs: int = 150,
+) -> tuple[str, Optional[str], dict]:
     """
-    Дообучить голову на патчах и сохранить версионированный чекпоинт под
-    data/active_learning/. from_ckpt=None → стартуем с вшитой модели (или можно
-    передать предыдущую AL-версию для накопительного дообучения).
+    Дообучить голову СОРТА (и, если есть bg_items, голову ФОНА) на патчах и
+    сохранить версионированные чекпоинты под data/active_learning/.
+
+    from_ckpt / from_bg_ckpt=None → стартуем с вшитых моделей; передать предыдущую
+    AL-версию для накопительного дообучения. Возвращает (grade_ckpt, bg_ckpt|None,
+    report). Голова фона учится на ТОМ ЖЕ frozen-энкодере, что и сорт, поэтому
+    эмбеддинги совместимы с инференсом.
     """
     from ml_service import train as T
-    from ml_service.model import DEFAULT_CKPT
+    from ml_service.model import DEFAULT_BG_CKPT, DEFAULT_CKPT
 
     base_ckpt = from_ckpt or DEFAULT_CKPT
-    save = _al_dir() / f"{Path(image_path).stem}__al_v{version}.pth"
+    stem = Path(image_path).stem
+    save = _al_dir() / f"{stem}__al_v{version}.pth"
     report = T.quick_finetune(items, from_ckpt=base_ckpt, save_ckpt=str(save), epochs=epochs)
     report["version"] = version
-    return str(save), report
+
+    bg_save: Optional[str] = None
+    if bg_items:
+        bg_out = _al_dir() / f"{stem}__al_bg_v{version}.pth"
+        report["bg"] = T.quick_finetune_bg(
+            bg_items,
+            encoder_ckpt=base_ckpt,
+            from_bg_ckpt=from_bg_ckpt or DEFAULT_BG_CKPT,
+            save_ckpt=str(bg_out),
+            epochs=bg_epochs,
+        )
+        bg_save = str(bg_out)
+    return str(save), bg_save, report
 
 
-def reanalyze(image_path: str, ckpt_path: str):
+def reanalyze(image_path: str, ckpt_path: str, bg_ckpt_path: Optional[str] = None):
     """
     Переинференс изображения дообученной моделью → AnalysisResult (маска +
     метрики + класс руды), как в pipeline.run_analysis, но с явным чекпоинтом и
     ОТДЕЛЬНОЙ выходной папкой (чтобы не затирать исходный результат «до»).
+    bg_ckpt_path — дообученная голова фона (если None, берётся вшитая).
     """
     from ml_service import infer
 
@@ -156,8 +260,12 @@ def reanalyze(image_path: str, ckpt_path: str):
     from . import metrics as metrics_mod
     from .schemas import AnalysisResult, MLResponse
 
-    out_dir = _al_dir() / "results" / Path(ckpt_path).stem
-    raw = infer.analyze_image(str(image_path), out_dir=str(out_dir), params={"ckpt": str(ckpt_path)})
+    tag = Path(bg_ckpt_path).stem if bg_ckpt_path else Path(ckpt_path).stem
+    out_dir = _al_dir() / "results" / tag
+    params: dict[str, Any] = {"ckpt": str(ckpt_path)}
+    if bg_ckpt_path:
+        params["bg_ckpt"] = str(bg_ckpt_path)
+    raw = infer.analyze_image(str(image_path), out_dir=str(out_dir), params=params)
     if config.VALIDATE_ML_RESPONSE:
         contract.assert_valid(raw)
     ml = MLResponse.from_json(raw)
