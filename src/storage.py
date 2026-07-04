@@ -55,24 +55,57 @@ def save_correction(image_path: str, correction: dict) -> Path:
     d = result_dir(image_path) / "corrections"
     d.mkdir(parents=True, exist_ok=True)
     record = {"created_at": time.strftime("%Y-%m-%dT%H:%M:%S"), **correction}
-    fname = f"corr_{int(time.time()*1000)}.json"
-    path = d / fname
+    # time_ns() -> практически исключает коллизии; while-цикл — на случай, если
+    # два сохранения всё же попадут в одну наносекунду (быстрый программный вызов).
+    path = d / f"corr_{time.time_ns()}.json"
+    while path.exists():
+        path = d / f"corr_{time.time_ns()}.json"
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 
 def list_corrections(image_path: str) -> list[dict]:
-    """Прочитать все сохранённые исправления по изображению."""
+    """
+    Прочитать все сохранённые исправления по изображению. Каждый dict несёт
+    служебный ключ "_id" (имя файла без расширения) — им и только им
+    адресуется удаление через delete_correction().
+    """
     d = result_dir(image_path) / "corrections"
     if not d.exists():
         return []
     out = []
     for p in sorted(d.glob("corr_*.json")):
         try:
-            out.append(json.loads(p.read_text(encoding="utf-8")))
+            record = json.loads(p.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             continue
+        record["_id"] = p.stem
+        out.append(record)
     return out
+
+
+def delete_correction(image_path: str, correction_id: str) -> bool:
+    """
+    Стереть одно исправление по "_id" (см. list_corrections). Возвращает True,
+    если файл был найден и удалён, False — если такого исправления уже нет.
+    """
+    d = result_dir(image_path) / "corrections"
+    p = d / f"{correction_id}.json"
+    if not p.is_file():
+        return False
+    p.unlink()
+    return True
+
+
+def delete_all_corrections(image_path: str) -> int:
+    """Стереть ВСЕ исправления изображения. Возвращает число удалённых файлов."""
+    d = result_dir(image_path) / "corrections"
+    if not d.exists():
+        return 0
+    files = list(d.glob("corr_*.json"))
+    for p in files:
+        p.unlink()
+    return len(files)
 
 
 # --------------------------------------------------------------------------- #
