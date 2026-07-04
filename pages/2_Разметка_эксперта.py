@@ -24,11 +24,11 @@ from src import annotation_config as ac
 from src import config, dataset_export as de, dataset_storage as ds, event_log as ev
 from ui import file_pickers, viewer
 
-st.set_page_config(page_title="OreVision — Активное обучение", page_icon="🖌️", layout="wide")
+st.set_page_config(page_title="OreVision — Разметка эксперта", page_icon="🖌️", layout="wide")
 config.ensure_dirs()
 Image.MAX_IMAGE_PIXELS = None
 
-st.title("🖌️ Активное обучение")
+st.title("🖌️ Разметка эксперта")
 st.caption(
     "Обведите мышью произвольную область на шлифе (замкнутая линия, не "
     "обязательно прямоугольник; правая кнопка мыши — отменить выделение), "
