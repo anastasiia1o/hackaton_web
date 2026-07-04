@@ -653,3 +653,31 @@ export_active_learning_patch()` — новый ImageFolder-формат
 
 Действие от другого потока: учесть новую кодировку id разметки; при желании —
 overlay блок-предсказаний модели из `patch_grid` на вьювере (мой контракт готов).
+
+---
+
+## 2026-07-04 — A: подключён РЕАЛЬНЫЙ ML-сервис (`ml_service/`)
+
+Что сделано: в репозиторий добавлена настоящая модель классификации сортов руды
+`grade_unfreeze_best.pth` (из ../ore_classification, se_resnext50_32x4d/MicroNet,
+macro-F1=0.944) и обёрнута HTTP-сервисом по нашему же контракту. Новый каталог
+`ml_service/` (server.py `/health`+`/analyze`, model.py, infer.py, requirements,
+README, reference/ с исходными скриптами и ОПИСАНИЕ_КОДА.txt). Веса (*.pth) в git
+НЕ коммитятся (.gitignore), лежат локально в `ml_service/`.
+
+Сопоставление классов: модель отдаёт 3 сорта → коды контракта:
+talc→3 (тальк), ordinary→1 (обычные срастания), fine→2 (тонкие срастания).
+Модель НЕ выдаёт фон(0)/артефакт(4): каждый тайл получает сорт. Опц. порог
+уверенности (ORE_ML_CONF_THRESHOLD) может помечать неуверенные тайлы кодом 4.
+
+Что это меняет для потока B: **НИЧЕГО в коде UI менять не нужно.** Сайт уже ходит
+в ML по HTTP (src/ml_client.py, режим real). Переключение — одной настройкой:
+`OREVISION_ML_MODE=real streamlit run app.py` (сервис поднять отдельно:
+`python ml_service/server.py`). Индикатор ML в сайдбаре опрашивает GET /health.
+Ответ real-сервиса — тот же контракт v2 (блочная mask + patch_grid), что и mock,
+так что overlay/метрики/классификация работают без изменений.
+
+Схемы (src/schemas.py) и контракт (API_CONTRACT.md) НЕ менялись — SEAM не тронут.
+Проверка без torch: `python ml_service/test_contract_shape.py` (ответ сервиса
+проходит src/contract.validate_ml_response + весь пайплайн metrics→classification,
+0 жёстких ошибок). py_compile всех файлов зелёный.

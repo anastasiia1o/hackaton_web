@@ -98,3 +98,11 @@
   отвечают 200) — проверено без Docker (Docker Desktop недоступен в среде
   агента); сам `docker build`/`docker compose up` руками не гонялся, статически
   вычитан
+
+- [DONE] (A) Подключение РЕАЛЬНОЙ модели: `ml_service/` — HTTP-обёртка
+  (Flask `/health`+`/analyze`) поверх `grade_unfreeze_best.pth`
+  (se_resnext50_32x4d/MicroNet). Ответ строго по contract v2 (блочная mask +
+  patch_grid), классы 3-сорта→коды контракта (talc→3, ordinary→1, fine→2).
+  Сайт не меняется — переключение `OREVISION_ML_MODE=real`. Форма ответа
+  проверена без torch (test_contract_shape.py: валидатор + пайплайн зелёные) —
+  stream-a/real-model-service
