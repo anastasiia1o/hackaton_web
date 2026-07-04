@@ -4,7 +4,18 @@ numpy>=1.26
 pillow>=10.0
 requests>=2.31
 reportlab>=4.0        # генерация PDF-отчётов (чистый Python)
-pandas>=2.0            # таблицы для страниц "Пакетная обработка"/"История" (поток B)
+pandas>=2.0            # таблицы для страниц "Пакетная обработка"/"История"
+scipy>=1.10           # морфология в квантайзере патчей и инференсе
+
+# --- ВСТРОЕННАЯ модель (режим local: инференс в процессе сайта) --------------
+# Модель вшита в репозиторий (ml_service/grade_unfreeze_best.pth). Для инференса
+# нужен torch-стек. Тяжёлый; CPU-сборка: torch --index-url .../whl/cpu.
+# se_resnext50_32x4d берётся из pretrainedmodels; smp 0.2.1 несовместим с torch
+# 2.x (тянет timm 0.4.12 с удалённым torch._six) — ключи модели те же в 0.3.x.
+torch>=2.0.0
+torchvision>=0.15.0
+segmentation-models-pytorch>=0.3,<0.4
+pretrainedmodels
 
 # --- ГИС-экспорт ---
 pyshp>=2.3            # запись Shapefile (.shp/.shx/.dbf). GeoJSON работает и без неё.

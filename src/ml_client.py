@@ -1,16 +1,17 @@
 """
-ML CLIENT — единственная точка, через которую сайт общается с ML.
+ML CLIENT — единственная точка, через которую сайт общается с моделью.
 
-Ключевая идея: остальной код НЕ знает, mock сейчас или real. Он просто зовёт
-`analyze(image_path)` и получает MLResponse. Переключение делается ОДНОЙ
-настройкой config.ML_MODE ("mock" | "real") или переменной окружения
-OREVISION_ML_MODE.
+Модель ВШИТА в репозиторий (ml_service/). MOCK-режима нет. Два способа считать
+(config.ML_MODE), но остальной код о них не знает — он просто зовёт
+`analyze(image_path)` и получает MLResponse:
 
-- mock  : результат генерирует mock_ml.generator локально;
-- real  : POST multipart/form-data на http://localhost:8001/analyze,
-          ответ разбирается тем же MLResponse.from_json.
+- local : модель грузится и считает В ПРОЦЕССЕ сайта (ml_service.infer) —
+          один `streamlit run`, без отдельного сервера. Нужен torch.
+- real  : POST multipart/form-data на http://localhost:8001/analyze
+          (отдельный сервис ml_service/server.py, напр. на GPU-машине).
 
-Так ML-команда может подключиться позже, ничего не ломая в сайте.
+Оба пути возвращают ОДИН И ТОТ ЖЕ JSON по API_CONTRACT.md, поэтому переключение
+режима не меняет ничего в остальном сайте.
 """
 
 from __future__ import annotations
@@ -34,8 +35,7 @@ def analyze(
     mode переопределяет config.ML_MODE (удобно для тестов и batch).
 
     Перед разбором ответ прогоняется через валидатор контракта
-    (src/contract.py). Если ML прислал что-то не по контракту — упадём с
-    ПОНЯТНОЙ ошибкой ContractError, а не где-то в глубине metrics.
+    (src/contract.py) — нарушения падают с ПОНЯТНОЙ ContractError.
     """
     mode = mode or config.ML_MODE
     if validate is None:
@@ -44,29 +44,28 @@ def analyze(
     if mode == "real":
         raw = _analyze_real(image_path, params)
     else:
-        raw = _analyze_mock(image_path, params)
+        raw = _analyze_local(image_path, params)
 
     if validate:
-        # Жёсткие нарушения -> ContractError; мягкие ([warning]) не роняют.
         contract.assert_valid(raw)
 
     return MLResponse.from_json(raw)
 
 
-def _analyze_mock(image_path: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
-    """Локальная генерация — импортируем внутри, чтобы mock был опциональным."""
-    from mock_ml.generator import generate
+def _analyze_local(image_path: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Инференс встроенной модели В ПРОЦЕССЕ сайта. Тяжёлый torch импортируется
+    внутри (и только здесь), модель кешируется в ml_service.model.load_model.
+    """
+    from ml_service import infer
 
     out_dir = config.RESULTS_DIR / Path(image_path).stem
-    return generate(image_path, out_dir=out_dir, params=params)
+    return infer.analyze_image(image_path, out_dir=str(out_dir), params=params)
 
 
 def _analyze_real(image_path: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Реальный вызов ML-сервиса.
-    Контракт запроса/ответа — в API_CONTRACT.md.
-    """
-    import requests  # импорт внутри: сайт запустится даже без requests в mock-режиме
+    """Реальный вызов ML-сервиса по HTTP. Контракт — в API_CONTRACT.md."""
+    import requests  # импорт внутри: local-режим не требует requests
 
     with open(image_path, "rb") as f:
         files = {"image": (Path(image_path).name, f)}
@@ -86,18 +85,41 @@ def _analyze_real(image_path: str, params: Optional[dict[str, Any]]) -> dict[str
 
 def health_check(mode: Optional[str] = None) -> tuple[bool, str]:
     """
-    Проверить доступность ML. Для mock всегда True.
-    Возвращает (ок?, сообщение) — удобно показать в UI индикатором.
+    Проверить готовность ML. Возвращает (ок?, сообщение) — для индикатора в UI.
+
+    local: проверяем, что установлен torch и на месте файл весов (сама модель
+    грузится лениво при первом анализе, поэтому health не тянет 100 МБ в память).
+    real:  GET /health у сервиса на :8001.
     """
     mode = mode or config.ML_MODE
-    if mode != "real":
-        return True, "MOCK-режим: ML имитируется локально."
-    try:
-        import requests
 
-        r = requests.get(f"{config.ML_SERVICE_URL}/health", timeout=3)
-        if r.ok:
-            return True, f"ML-сервис доступен: {config.ML_SERVICE_URL}"
-        return False, f"ML ответил кодом {r.status_code}"
-    except Exception as e:  # noqa: BLE001 — показываем геологу простое сообщение
-        return False, f"ML-сервис недоступен ({config.ML_SERVICE_URL}): {e}"
+    if mode == "real":
+        try:
+            import requests
+
+            r = requests.get(f"{config.ML_SERVICE_URL}/health", timeout=3)
+            if r.ok:
+                return True, f"ML-сервис доступен: {config.ML_SERVICE_URL}"
+            return False, f"ML ответил кодом {r.status_code}"
+        except Exception as e:  # noqa: BLE001
+            return False, f"ML-сервис недоступен ({config.ML_SERVICE_URL}): {e}"
+
+    # local: встроенная модель
+    import importlib.util
+    import os
+
+    from ml_service import model as M  # лёгкий импорт: torch тут не грузится
+
+    if importlib.util.find_spec("torch") is None:
+        return False, (
+            "torch не установлен — встроенная модель не запустится. "
+            "Установите зависимости: pip install -r requirements.txt"
+        )
+    if not os.path.exists(M.DEFAULT_CKPT):
+        return False, f"Не найден файл весов модели: {M.DEFAULT_CKPT}"
+
+    loaded = M.load_model.cache_info().currsize > 0
+    return True, (
+        "Встроенная модель готова (grade_unfreeze_best.pth)"
+        + (" — загружена в память." if loaded else ", загрузится при первом анализе.")
+    )

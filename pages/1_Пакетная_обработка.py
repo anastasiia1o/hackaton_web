@@ -181,19 +181,6 @@ else:
             ev.log_import(LOG_SCOPE, "queue_clear", removed=len(queue))
             st.rerun()
 
-scenario = None
-if config.ML_MODE == "mock":
-    scenario = st.selectbox(
-        "Демо-сценарий (mock применяется ко всем изображениям)",
-        options=["refractory", "ordinary", "talc", "review"],
-        format_func=lambda s: {
-            "refractory": "Труднообогатимая (тонкие)",
-            "ordinary": "Рядовая (обычные)",
-            "talc": "Оталькованная (тальк >10%)",
-            "review": "Пограничный (проверка)",
-        }[s],
-    )
-
 run = st.button("▶️ Запустить обработку", type="primary", disabled=not any(r["valid"] for r in queue))
 
 # --- Выполнение -------------------------------------------------------------
@@ -203,7 +190,7 @@ run = st.button("▶️ Запустить обработку", type="primary", 
 # пропадали бы — то же "зависание", что было на главной странице.
 if run:
     valid_items = [r for r in queue if r["valid"]]
-    params = {"scenario": scenario} if scenario else None
+    params = None
     progress = st.progress(0.0, text="Старт…")
     status = st.empty()
     rows: list[dict] = []

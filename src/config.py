@@ -28,10 +28,14 @@ SAMPLES_DIR = DATA_DIR / "samples"     # демонстрационные обр
 APP_VERSION = "0.2.0"          # версия сайта OreVision
 CONTRACT_VERSION = "v2"        # v2: блочная маска + patch_grid (patch-classification)
 
-# --- Настройки ML-сервиса ---------------------------------------------------
-# По умолчанию работаем в MOCK-режиме, чтобы сайт можно было запустить
-# и показать ДО того, как ML-команда поднимет свой сервис.
-ML_MODE = os.getenv("OREVISION_ML_MODE", "mock")          # "mock" | "real"
+# --- Настройки ML ------------------------------------------------------------
+# Модель ВШИТА в репозиторий (ml_service/grade_unfreeze_best.pth). MOCK-режима
+# больше нет. Два способа считать:
+#   "local" — модель грузится В ПРОЦЕССЕ сайта (по умолчанию: один `streamlit
+#             run`, никакого отдельного сервера; нужен torch — см. requirements);
+#   "real"  — HTTP к отдельному сервису ml_service/server.py на :8001 (удобно,
+#             когда инференс хочется вынести на GPU-машину).
+ML_MODE = os.getenv("OREVISION_ML_MODE", "local")         # "local" | "real"
 ML_SERVICE_URL = os.getenv("OREVISION_ML_URL", "http://localhost:8001")
 ML_ANALYZE_ENDPOINT = f"{ML_SERVICE_URL}/analyze"
 ML_TIMEOUT_SEC = int(os.getenv("OREVISION_ML_TIMEOUT", "300"))  # до 5 минут на панораму

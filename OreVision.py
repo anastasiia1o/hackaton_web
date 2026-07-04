@@ -9,8 +9,8 @@ OreVision — локальный веб-интерфейс (Streamlit).
     загрузка изображения → анализ (ML) → overlay-маска + слои → метрики →
     rule-based классификация → ЭКСПОРТ ДАННЫХ → АКТИВНОЕ ОБУЧЕНИЕ (правки).
 
-Работает в MOCK-режиме без ML-сервиса (config.ML_MODE = "mock").
-Реальный ML подключается одной настройкой OREVISION_ML_MODE=real (см. ml_service/).
+Модель ВШИТА в приложение (ml_service/grade_unfreeze_best.pth) и по умолчанию
+считает В ПРОЦЕССЕ сайта (config.ML_MODE = "local") — MOCK-режима больше нет.
 """
 
 from __future__ import annotations
@@ -60,26 +60,14 @@ with st.sidebar:
     (st.success if ok else st.error)(msg)
 
     st.divider()
-    st.subheader("Режим ML")
-    st.write(f"Текущий режим: **{config.ML_MODE.upper()}**")
+    st.subheader("Модель")
+    st.write(f"Режим: **{config.ML_MODE.upper()}**")
     st.caption(
-        "Смените режим переменной окружения `OREVISION_ML_MODE=real`, "
-        "чтобы подключить реальный ML-сервис на :8001."
+        "Классификатор сортов руды ВШИТ в приложение "
+        "(grade_unfreeze_best.pth) и считает локально. "
+        "`OREVISION_ML_MODE=real` — вынести инференс в отдельный сервис "
+        "ml_service/ на :8001 (напр. на GPU-машину)."
     )
-
-    scenario = None
-    if config.ML_MODE == "mock":
-        st.subheader("Демо-сценарий (mock)")
-        scenario = st.selectbox(
-            "Какой тип руды имитировать",
-            options=["refractory", "ordinary", "talc", "review"],
-            format_func=lambda s: {
-                "refractory": "Труднообогатимая (тонкие)",
-                "ordinary": "Рядовая (обычные)",
-                "talc": "Оталькованная (тальк >10%)",
-                "review": "Пограничный (проверка)",
-            }[s],
-        )
 
     st.divider()
     st.subheader("Слои маски")
@@ -113,38 +101,18 @@ uploaded = st.file_uploader(
     type=[e.lstrip(".") for e in config.SUPPORTED_FORMATS],
 )
 
-# Кнопка "демо без файла" — удобно показывать жюри без загрузки.
-# ВАЖНО: st.button() возвращает True только на ОДИН rerun сразу после клика.
-# Раньше от этого зависела вся страница результатов — стоило нажать любую
-# другую кнопку (например, "Скачать CSV"), новый rerun видел demo=False,
-# uploaded=None, и вся страница с результатами и остальными кнопками экспорта
-# пропадала (нужно было заново нажимать демо-кнопку). Поэтому активацию демо
-# сохраняем в session_state — один раз включили, и она остаётся до тех пор,
-# пока не загрузят настоящий файл.
-if st.button("Показать на демо-образце (без загрузки файла)"):
-    st.session_state["demo_active"] = True
-
 
 def _resolve_input() -> Path | None:
-    """Определить, какое изображение анализировать: загруженное или демо."""
+    """Изображение для анализа — загруженный файл (демо-режима больше нет)."""
     if uploaded is not None:
-        st.session_state["demo_active"] = False
-        path = storage.save_upload(uploaded.getvalue(), uploaded.name)
-        return path
-    if st.session_state.get("demo_active"):
-        # Создаём простой серый холст как "исходник" под mock-маску.
-        config.ensure_dirs()
-        demo_path = config.SAMPLES_DIR / "demo_slide.png"
-        if not demo_path.exists():
-            Image.new("RGB", (900, 700), (60, 60, 66)).save(demo_path)
-        return demo_path
+        return storage.save_upload(uploaded.getvalue(), uploaded.name)
     return None
 
 
 image_path = _resolve_input()
 
 if image_path is None:
-    st.info("Загрузите изображение или нажмите «Показать на демо-образце».")
+    st.info("Загрузите изображение шлифа/панораму для анализа встроенной моделью.")
     st.stop()
 
 # Размер оригинала нужен дальше (координаты исправлений считаем в его пикселях).
@@ -154,18 +122,14 @@ with Image.open(image_path) as im:
     w, h = im.size
 
 # --- Запуск анализа (кэшируется — см. _cached_run_analysis) -----------------
-params = {"scenario": scenario} if scenario else None
 _stat = Path(image_path).stat()
 _file_sig = f"{_stat.st_size}:{_stat.st_mtime_ns}"
-with st.spinner("Анализируем изображение…"):
+with st.spinner("Анализируем изображение встроенной моделью…"):
     try:
-        result = _cached_run_analysis(str(image_path), params, None, _file_sig)
+        result = _cached_run_analysis(str(image_path), None, None, _file_sig)
     except ContractError as e:
-        st.error(f"Ответ ML-сервиса не соответствует контракту: {e}")
-        st.caption(
-            "Проверьте ML-сервис (см. docs/ML_INTEGRATION_GUIDE.md) или "
-            "переключитесь в MOCK-режим."
-        )
+        st.error(f"Ответ модели не соответствует контракту: {e}")
+        st.caption("См. docs/ML_INTEGRATION_GUIDE.md.")
         st.stop()
     except Exception as e:  # noqa: BLE001
         st.error(f"Не удалось выполнить анализ: {e}")

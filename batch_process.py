@@ -2,10 +2,11 @@
 BATCH — пакетная обработка серии изображений без участия пользователя.
 
 Запуск (Windows PowerShell):
-    python batch_process.py data\\uploads --scenario refractory
+    python batch_process.py data\\uploads
 
 Для каждого изображения из папки:
     ML → метрики → классификация → сохранение CSV/JSON/PDF + строка в лог.
+Анализ делает встроенная модель (config.ML_MODE, по умолчанию local).
 В конце печатает сводную таблицу по всем образцам.
 """
 
@@ -33,9 +34,7 @@ def find_images(folder: Path) -> list[Path]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="OreVision batch processing")
     parser.add_argument("folder", help="Папка с изображениями")
-    parser.add_argument("--scenario", default=None,
-                        help="mock-сценарий: refractory|ordinary|talc|review")
-    parser.add_argument("--mode", default=None, help="mock|real (по умолчанию из config)")
+    parser.add_argument("--mode", default=None, help="local|real (по умолчанию из config)")
     args = parser.parse_args()
 
     config.ensure_dirs()
@@ -45,7 +44,7 @@ def main() -> int:
         print(f"В папке {folder} не найдено изображений {config.SUPPORTED_FORMATS}")
         return 1
 
-    params = {"scenario": args.scenario} if args.scenario else None
+    params = None
     print(f"Найдено изображений: {len(images)}\n")
     summary = []
 
