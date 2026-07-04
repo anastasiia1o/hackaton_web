@@ -46,13 +46,13 @@ from pathlib import Path
 import numpy as np
 
 from .model import (
-    DEFAULT_BG_CKPT,
     DEFAULT_CKPT,
     IMAGENET_MEAN,
     IMAGENET_STD,
     MODEL_CLASS_NAMES,
     MODEL_TO_CONTRACT,
     _build_module,
+    _load_weights_into,
     _torch,
     device,
 )
@@ -319,8 +319,11 @@ def finetune(
 
     model = _build_module().to(dev)
     if from_ckpt and os.path.exists(from_ckpt):
-        state = torch.load(from_ckpt, map_location=dev, weights_only=True)
-        model.load_state_dict(state)
+        # _load_weights_into: понимает и мультиголовый (encoder+head+bg_head), и
+        # старый grade-only формат чекпоинта (bg_head тогда — фолбэк на вшитый
+        # bg_head_best.pth), и переносит bg_head в СОХРАНЯЕМЫЙ ниже чекпоинт —
+        # иначе он остался бы со случайной инициализацией.
+        _load_weights_into(model, from_ckpt)
         log(f"Старт с чекпоинта: {from_ckpt}")
     else:
         log(f"[WARN] Чекпоинт {from_ckpt} не найден — обучение с нуля (случайная инициализация головы)")
@@ -403,12 +406,13 @@ def finetune(
 
 
 # --------------------------------------------------------------------------- #
-# Быстрое дообучение головы (интерактивное активное обучение на странице OreVision)
+# Быстрое дообучение голов (интерактивное активное обучение на странице OreVision)
 # --------------------------------------------------------------------------- #
 # Полный finetune() разогревает энкодер и идёт минуты — для интерактивного цикла
 # «правка эксперта → сразу результат» это слишком долго. Здесь энкодер ЗАМОРОЖЕН,
-# его признаки (2048-D) считаются ОДИН раз на патч, а обучается только голова
-# (Linear 2048→256→3) — это быстро даже на CPU и не разрушает энкодер.
+# его признаки (2048-D) считаются ОДИН раз на патч, а обучаются только головы
+# (сорт: Linear 2048→256→3, фон: Linear 2048→1) — быстро даже на CPU, энкодер не
+# трогаем. quick_finetune_multihead() сохраняет ОБЕ головы в ОДИН чекпоинт.
 
 def _square_crops(pil, k: int, rng: random.Random) -> list[np.ndarray]:
     """k квадратных кропов патча -> массивы (IMG_SIZE,IMG_SIZE,3) float32.
@@ -471,27 +475,38 @@ def encode_features(model, items, *, augment_k: int = 6, dev=None, batch: int = 
             torch.tensor(weights, dtype=torch.float32))
 
 
-def quick_finetune(
+def quick_finetune_multihead(
     items,
+    bg_items,
     *,
     from_ckpt: str = DEFAULT_CKPT,
     save_ckpt: str,
     epochs: int = 60,
     lr: float = 1e-3,
+    bg_epochs: int = 150,
+    bg_lr: float = 5e-3,
     augment_k: int = 6,
     seed: int = 42,
     log=print,
 ) -> dict:
     """
-    Быстрое дообучение ТОЛЬКО головы на патчах эксперта (+ якорях) и сохранение
-    полного чекпоинта (энкодер без изменений + новая голова). Возвращает отчёт.
+    Быстрое дообучение ОБЕИХ голов (сорт + фон) поверх ОДНОГО замороженного
+    энкодера и сохранение ОДНОГО мультиголового чекпоинта (encoder+head+bg_head
+    в одном state_dict — см. ml_service/model.py). Раньше это были два отдельных
+    чекпоинта (grade-only + bg-only Linear), из-за чего `ORE_ML_CKPT` не мог
+    сам по себе подключить дообученный фон — теперь один файл, один env var.
 
-    items: [(PIL.Image, model_idx, weight), ...] — исправления эксперта идут с
-    большим весом, «якоря» (текущее предсказание модели на случайных тайлах) — с
-    малым, чтобы дообучение не схлопнуло все классы в исправленный.
+    items: [(PIL.Image, model_idx, weight)] — патчи для головы сорта (правки
+    эксперта с большим весом + якоря с малым, чтобы не схлопнуть классы).
+    bg_items: [(PIL.Image, bg_label, weight)], bg_label 1=фон/0=руда — патчи для
+    головы фона. Любой из списков может быть пустым — тогда соответствующая
+    голова остаётся такой же, как в from_ckpt (не трогаем, не переинициализируем).
     """
     torch = _torch()
     import torch.nn as nn  # noqa: PLC0415
+
+    if not items and not bg_items:
+        raise ValueError("нет обучающих патчей ни для головы сорта, ни для головы фона")
 
     random.seed(seed)
     np.random.seed(seed)
@@ -500,153 +515,99 @@ def quick_finetune(
 
     model = _build_module().to(dev)
     if from_ckpt and os.path.exists(from_ckpt):
-        model.load_state_dict(torch.load(from_ckpt, map_location=dev, weights_only=True))
+        _load_weights_into(model, from_ckpt)  # накопительно; понимает оба формата
         log(f"Старт с чекпоинта: {from_ckpt}")
     else:
-        log(f"[WARN] Чекпоинт {from_ckpt} не найден — голова обучается с нуля")
+        log(f"[WARN] Чекпоинт {from_ckpt} не найден — головы обучаются с нуля")
     for p in model.encoder.parameters():
         p.requires_grad = False
 
-    feats, labels, weights = encode_features(model, items, augment_k=augment_k, dev=dev, seed=seed)
-    if feats.shape[0] == 0:
-        raise ValueError("нет обучающих патчей для дообучения")
-    feats, labels, weights = feats.to(dev), labels.to(dev), weights.to(dev)
+    report: dict = {"save_ckpt": str(save_ckpt), "from_ckpt": from_ckpt}
 
-    counts = [max(1, int((labels == c).sum())) for c in range(3)]
-    cw = torch.tensor([1.0 / c for c in counts], dtype=torch.float32)
-    cw = cw / cw.mean()
-    criterion = nn.CrossEntropyLoss(weight=cw.to(dev), reduction="none")
-    optimizer = torch.optim.Adam(model.head.parameters(), lr=lr)
+    if items:
+        feats, labels, weights = encode_features(model, items, augment_k=augment_k, dev=dev, seed=seed)
+        if feats.shape[0] == 0:
+            raise ValueError("нет обучающих патчей для дообучения головы сорта")
+        feats, labels, weights = feats.to(dev), labels.to(dev), weights.to(dev)
 
-    model.head.train()
-    losses = []
-    for _ep in range(1, epochs + 1):
-        optimizer.zero_grad()
-        loss = (criterion(model.head(feats), labels) * weights).mean()
-        loss.backward()
-        optimizer.step()
-        losses.append(float(loss.item()))
+        counts = [max(1, int((labels == c).sum())) for c in range(3)]
+        cw = torch.tensor([1.0 / c for c in counts], dtype=torch.float32)
+        cw = cw / cw.mean()
+        criterion = nn.CrossEntropyLoss(weight=cw.to(dev), reduction="none")
+        optimizer = torch.optim.Adam(model.head.parameters(), lr=lr)
+
+        model.head.train()
+        losses = []
+        for _ep in range(1, epochs + 1):
+            optimizer.zero_grad()
+            loss = (criterion(model.head(feats), labels) * weights).mean()
+            loss.backward()
+            optimizer.step()
+            losses.append(float(loss.item()))
+        model.head.eval()
+        with torch.no_grad():
+            acc = float((model.head(feats).argmax(1) == labels).float().mean())
+
+        log(f"[сорт] loss={losses[-1]:.4f}  train_acc={acc:.3f}")
+        report.update({
+            "num_patches": len(items),
+            "num_feature_vectors": int(feats.shape[0]),
+            "epochs": epochs,
+            "final_loss": round(losses[-1], 4),
+            "train_acc": round(acc, 4),
+            "class_counts": {MODEL_CLASS_NAMES[c]: counts[c] for c in range(3)},
+        })
+
+    if bg_items:
+        feats_bg, labels_bg, weights_bg = encode_features(
+            model, bg_items, augment_k=augment_k, dev=dev, seed=seed
+        )
+        if feats_bg.shape[0] == 0:
+            raise ValueError("нет обучающих патчей для дообучения головы фона")
+        y = labels_bg.to(dev).float()                      # bg_label 0/1
+        feats_bg, weights_bg = feats_bg.to(dev), weights_bg.to(dev)
+
+        n_pos = float((y > 0.5).sum())                  # фон
+        n_neg = float((y <= 0.5).sum())                 # руда
+        # pos_weight = neg/pos балансирует редкий класс; ограничим, чтобы не взорвать.
+        pw = min(20.0, max(0.05, (n_neg / n_pos) if n_pos > 0 else 1.0))
+        criterion_bg = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([pw], device=dev), reduction="none"
+        )
+        optimizer_bg = torch.optim.Adam(model.bg_head.parameters(), lr=bg_lr, weight_decay=1e-4)
+
+        model.bg_head.train()
+        losses_bg = []
+        for _ep in range(1, bg_epochs + 1):
+            optimizer_bg.zero_grad()
+            logit = model.bg_head(feats_bg).squeeze(1)
+            loss = (criterion_bg(logit, y) * weights_bg).mean()
+            loss.backward()
+            optimizer_bg.step()
+            losses_bg.append(float(loss.item()))
+        model.bg_head.eval()
+        with torch.no_grad():
+            prob = torch.sigmoid(model.bg_head(feats_bg).squeeze(1))
+            acc_bg = float(((prob > 0.5).float() == y).float().mean())
+        model.bg_enabled = True
+
+        log(f"[фон] loss={losses_bg[-1]:.4f}  train_acc={acc_bg:.3f}")
+        report["bg"] = {
+            "num_patches": len(bg_items),
+            "num_feature_vectors": int(feats_bg.shape[0]),
+            "epochs": bg_epochs,
+            "pos_weight": round(pw, 3),
+            "final_loss": round(losses_bg[-1], 4),
+            "train_acc": round(acc_bg, 4),
+            "label_counts": {"фон": int(n_pos), "руда": int(n_neg)},
+        }
 
     model.eval()
-    with torch.no_grad():
-        acc = float((model.head(feats).argmax(1) == labels).float().mean())
-
     Path(save_ckpt).parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), str(save_ckpt))
-    log(f"✓ сохранён {save_ckpt}  loss={losses[-1]:.4f}  train_acc={acc:.3f}")
+    log(f"✓ сохранён мультиголовый чекпоинт {save_ckpt}")
 
-    return {
-        "save_ckpt": str(save_ckpt),
-        "from_ckpt": from_ckpt,
-        "num_patches": len(items),
-        "num_feature_vectors": int(feats.shape[0]),
-        "epochs": epochs,
-        "final_loss": round(losses[-1], 4),
-        "train_acc": round(acc, 4),
-        "class_counts": {MODEL_CLASS_NAMES[c]: counts[c] for c in range(3)},
-    }
-
-
-def _load_bg_head_trainable(from_bg_ckpt, dev):
-    """Обучаемая голова фона Linear(2048→1). Стартуем с существующего чекпоинта
-    (накопительно), либо со свежей инициализации, если его нет."""
-    torch = _torch()
-    import torch.nn as nn  # noqa: PLC0415
-
-    head = nn.Linear(2048, 1).to(dev)
-    if from_bg_ckpt and os.path.exists(from_bg_ckpt):
-        head.load_state_dict(torch.load(from_bg_ckpt, map_location=dev, weights_only=True))
-    else:
-        nn.init.normal_(head.weight, std=0.01)
-        nn.init.zeros_(head.bias)
-    return head
-
-
-def quick_finetune_bg(
-    items,
-    *,
-    encoder_ckpt: str = DEFAULT_CKPT,
-    from_bg_ckpt: str = DEFAULT_BG_CKPT,
-    save_ckpt: str,
-    epochs: int = 150,
-    lr: float = 5e-3,
-    augment_k: int = 6,
-    seed: int = 42,
-    log=print,
-) -> dict:
-    """
-    Дообучение ГОЛОВЫ ФОНА (Linear(2048→1)) на патчах эксперта. items:
-    [(PIL.Image, bg_label, weight)], где bg_label: 1 = фон, 0 = руда (НЕ фон).
-
-    Энкодер тот же замороженный, что и у сортовой модели, — эмбеддинги общие и
-    совместимы с инференсом. Голова стартует с вшитого `bg_head_best.pth`
-    (накопительно). Голова уверенная (даёт ~0.99), поэтому чтобы сдвинуть её
-    решение, дообучаем дольше (много эпох, полный батч на кешированных признаках)
-    и балансируем классы через pos_weight + повесовые множители сэмплов.
-    """
-    torch = _torch()
-    import torch.nn as nn  # noqa: PLC0415
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    dev = device()
-
-    # Энкодер для признаков: тот же frozen-encoder сортовой модели.
-    enc = _build_module().to(dev)
-    if encoder_ckpt and os.path.exists(encoder_ckpt):
-        enc.load_state_dict(torch.load(encoder_ckpt, map_location=dev, weights_only=True))
-    for p in enc.parameters():
-        p.requires_grad = False
-
-    feats, labels, weights = encode_features(enc, items, augment_k=augment_k, dev=dev, seed=seed)
-    if feats.shape[0] == 0:
-        raise ValueError("нет обучающих патчей для дообучения головы фона")
-    y = labels.to(dev).float()                      # bg_label 0/1
-    feats, weights = feats.to(dev), weights.to(dev)
-
-    n_pos = float((y > 0.5).sum())                  # фон
-    n_neg = float((y <= 0.5).sum())                 # руда
-    # pos_weight = neg/pos балансирует редкий класс; ограничим, чтобы не взорвать.
-    pw = min(20.0, max(0.05, (n_neg / n_pos) if n_pos > 0 else 1.0))
-    criterion = nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor([pw], device=dev), reduction="none"
-    )
-
-    head = _load_bg_head_trainable(from_bg_ckpt, dev)
-    optimizer = torch.optim.Adam(head.parameters(), lr=lr, weight_decay=1e-4)
-
-    head.train()
-    losses = []
-    for _ep in range(1, epochs + 1):
-        optimizer.zero_grad()
-        logit = head(feats).squeeze(1)
-        loss = (criterion(logit, y) * weights).mean()
-        loss.backward()
-        optimizer.step()
-        losses.append(float(loss.item()))
-
-    head.eval()
-    with torch.no_grad():
-        prob = torch.sigmoid(head(feats).squeeze(1))
-        pred = (prob > 0.5).float()
-        acc = float((pred == y).float().mean())
-
-    Path(save_ckpt).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(head.state_dict(), str(save_ckpt))
-    log(f"✓ сохранён bg-чекпоинт {save_ckpt}  loss={losses[-1]:.4f}  train_acc={acc:.3f}")
-
-    return {
-        "save_ckpt": str(save_ckpt),
-        "from_bg_ckpt": from_bg_ckpt,
-        "num_patches": len(items),
-        "num_feature_vectors": int(feats.shape[0]),
-        "epochs": epochs,
-        "pos_weight": round(pw, 3),
-        "final_loss": round(losses[-1], 4),
-        "train_acc": round(acc, 4),
-        "label_counts": {"фон": int(n_pos), "руда": int(n_neg)},
-    }
+    return report
 
 
 # --------------------------------------------------------------------------- #

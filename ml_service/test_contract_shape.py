@@ -41,7 +41,7 @@ def _install_fake_model(bg_value=None):
         # Разные классы, чтобы получить непустую сетку и objects.
         return _softmax(rng.random((len(tensors), 3)))
 
-    def fake_infer_batch_cascade(_model, _bg_head, tensors):
+    def fake_infer_batch_cascade(_model, tensors):
         grade = _softmax(rng.random((len(tensors), 3)))
         if bg_value is None:
             bg = rng.random(len(tensors)).astype(np.float32)
@@ -49,8 +49,10 @@ def _install_fake_model(bg_value=None):
             bg = np.full(len(tensors), float(bg_value), dtype=np.float32)
         return grade, bg
 
-    M.load_model = lambda *a, **k: object()          # noqa: E731
-    M.load_bg_head = lambda *a, **k: object()        # noqa: E731 (bg-каскад активен)
+    class _FakeModel:
+        bg_enabled = True  # мультиголовый чекпоинт с активным bg_head
+
+    M.load_model = lambda *a, **k: _FakeModel()      # noqa: E731
     M.preprocess = lambda crop, tile: crop           # noqa: E731 (заглушка тензора)
     M.infer_batch = fake_infer_batch
     M.infer_batch_cascade = fake_infer_batch_cascade

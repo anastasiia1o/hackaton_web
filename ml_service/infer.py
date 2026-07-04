@@ -61,8 +61,8 @@ MODEL_VERSION = "grade-se_resnext50-micronet-bg-0.2.0"
 # Возвращают уже КОДЫ КОНТРАКТА (0 фон / 1 обычные / 2 тонкие / 3 тальк) и
 # уверенность 0..1 на ячейку. Детекция фона идёт ПО ТАЙЛАМ на любых снимках,
 # включая панорамы: тайл-фон (sigmoid(bg_head) > bg_thr) -> код 0, уверенность =
-# вероятность фона; иначе argmax головы сорта. bg_head=None -> режим «3 класса».
-def _run_grid(model, bg_head, img_np, tile, batch_size, bg_thr):
+# вероятность фона; иначе argmax головы сорта. model.bg_enabled=False -> «3 класса».
+def _run_grid(model, img_np, tile, batch_size, bg_thr):
     """Непересекающаяся сетка тайлов; каждый тайл -> один класс. stride == tile."""
     H, W = img_np.shape[:2]
     rows = (H + tile - 1) // tile
@@ -73,7 +73,7 @@ def _run_grid(model, bg_head, img_np, tile, batch_size, bg_thr):
     positions, tensors = [], []
 
     def flush(pos, tens):
-        grade, bg = M.infer_batch_cascade(model, bg_head, tens)
+        grade, bg = M.infer_batch_cascade(model, tens)
         for (r, c), gv, bv in zip(pos, grade, bg):
             if bv > bg_thr:
                 grid_labels[r, c] = M.CONTRACT_BACKGROUND
@@ -97,7 +97,7 @@ def _run_grid(model, bg_head, img_np, tile, batch_size, bg_thr):
     return grid_labels, confs, rows, cols, tile
 
 
-def _run_slide(model, bg_head, img_np, tile, batch_size, bg_thr):
+def _run_slide(model, img_np, tile, batch_size, bg_thr):
     """Скользящее окно, шаг tile//2, soft-vote (сумма вероятностей) в перекрытиях."""
     H, W = img_np.shape[:2]
     stride = tile // 2
@@ -115,7 +115,7 @@ def _run_slide(model, bg_head, img_np, tile, batch_size, bg_thr):
     positions, tensors = [], []
 
     def flush(pos, tens):
-        grade, bg = M.infer_batch_cascade(model, bg_head, tens)
+        grade, bg = M.infer_batch_cascade(model, tens)
         for (ri, ci), gv, bv in zip(pos, grade, bg):
             prob_acc[ri, ci] += gv
             bg_grid[ri, ci] = float(bv)
@@ -213,26 +213,24 @@ def analyze_image(
     img_np = np.array(img)
 
     # `ckpt` — опциональный путь к весам (активное обучение переинференсит
-    # дообученной моделью). load_model кешируется по пути, поэтому базовая модель
-    # и дообученные версии сосуществуют в памяти без коллизий.
-    ckpt = params.get("ckpt")
-    model = M.load_model(ckpt) if ckpt else M.load_model()
-
-    # Голова-детектор фона (общий энкодер). `bg_ckpt=""` в params отключает фон.
-    # Энкодер при активном обучении заморожен -> bg_head совместим с дообученными
-    # чекпоинтами и грузится независимо от пути grade-весов. Детекция фона идёт
-    # ПО ТАЙЛАМ на любых снимках, включая панорамы (см. _run_grid/_run_slide).
-    bg_ckpt = params.get("bg_ckpt", M.DEFAULT_BG_CKPT)
-    bg_head = M.load_bg_head(bg_ckpt) if bg_ckpt else None
+    # дообученной моделью). Чекпоинт мультиголовый (encoder+head+bg_head в одном
+    # state_dict) — load_model кешируется по (ckpt, bg_ckpt), поэтому базовая
+    # модель и дообученные версии сосуществуют в памяти без коллизий.
+    # `bg_ckpt` (params): не передан -> голова фона берётся из САМОГО ckpt, если
+    # там есть, иначе фолбэк на вшитый bg_head_best.pth; "" -> фон отключён явно;
+    # путь -> явный отдельный legacy bg-чекпоинт поверх ckpt.
+    ckpt = params.get("ckpt") or M.DEFAULT_CKPT
+    bg_ckpt = params.get("bg_ckpt")
+    model = M.load_model(ckpt, bg_ckpt)
 
     if mode == "slide":
         grid_labels, confs, rows, cols, stride = _run_slide(
-            model, bg_head, img_np, tile, batch, bg_thr
+            model, img_np, tile, batch, bg_thr
         )
     else:
         mode = "grid"
         grid_labels, confs, rows, cols, stride = _run_grid(
-            model, bg_head, img_np, tile, batch, bg_thr
+            model, img_np, tile, batch, bg_thr
         )
 
     # grid_labels уже в кодах контракта (0 фон / 1 / 2 / 3). confs — 0..1.
@@ -241,7 +239,8 @@ def analyze_image(
 
     warnings: list[str] = []
     n_bg = int((grid_labels == M.CONTRACT_BACKGROUND).sum())
-    if bg_head is None:
+    bg_enabled = getattr(model, "bg_enabled", False)
+    if not bg_enabled:
         warnings.append(
             "[warning] Детектор фона отключён (bg_head_best.pth не найден) — "
             "фон не выделяется, режим «3 класса»."
@@ -282,7 +281,7 @@ def analyze_image(
         "inference_params": {
             "mode": mode, "tile": tile, "stride": stride,
             "batch": batch, "grid": [rows, cols], "device": M.device(),
-            "bg_detector": bg_head is not None,
+            "bg_detector": bg_enabled,
             "bg_threshold": bg_thr, "background_cells": n_bg,
         },
         "image_size": {"width": W, "height": H},

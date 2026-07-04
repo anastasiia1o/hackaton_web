@@ -6,8 +6,10 @@ ACTIVE LEARNING — интерактивный цикл прямо на стра
 результат СРАЗУ переинференсится и показывается на той же картинке («было/стало»).
 
 Оркестрация тонкая, тяжёлое — в ml_service:
-  - `ml_service/train.py:quick_finetune` — быстрое дообучение головы (энкодер
-    заморожен, признаки кешируются) на патчах эксперта + якорях;
+  - `ml_service/train.py:quick_finetune_multihead` — быстрое дообучение ОБЕИХ
+    голов (сорт + фон, энкодер заморожен, признаки кешируются) на патчах
+    эксперта + якорях; сохраняет ОДИН мультиголовый чекпоинт (encoder+head+
+    bg_head в одном .pth), поэтому `ORE_ML_CKPT` подключает обе головы разом;
   - `ml_service/infer.py:analyze_image(params={"ckpt": ...})` — переинференс
     дообученной моделью (load_model кешируется по пути весов).
 
@@ -212,47 +214,37 @@ def retrain_and_save(
     from_ckpt: Optional[str] = None,
     epochs: int = 60,
     bg_items: Optional[list[tuple[Image.Image, int, float]]] = None,
-    from_bg_ckpt: Optional[str] = None,
     bg_epochs: int = 150,
-) -> tuple[str, Optional[str], dict]:
+) -> tuple[str, dict]:
     """
-    Дообучить голову СОРТА (и, если есть bg_items, голову ФОНА) на патчах и
-    сохранить версионированные чекпоинты под data/active_learning/.
+    Дообучить голову СОРТА и (если есть bg_items) голову ФОНА поверх ОДНОГО
+    замороженного энкодера и сохранить ОДИН версионированный мультиголовый
+    чекпоинт (encoder+head+bg_head) под data/active_learning/.
 
-    from_ckpt / from_bg_ckpt=None → стартуем с вшитых моделей; передать предыдущую
-    AL-версию для накопительного дообучения. Возвращает (grade_ckpt, bg_ckpt|None,
-    report). Голова фона учится на ТОМ ЖЕ frozen-энкодере, что и сорт, поэтому
-    эмбеддинги совместимы с инференсом.
+    from_ckpt=None → стартуем с вшитой модели; передать предыдущую AL-версию
+    для накопительного дообучения (обеих голов сразу — это один и тот же файл).
+    Возвращает (ckpt_path, report).
     """
     from ml_service import train as T
-    from ml_service.model import DEFAULT_BG_CKPT, DEFAULT_CKPT
+    from ml_service.model import DEFAULT_CKPT
 
     base_ckpt = from_ckpt or DEFAULT_CKPT
     stem = Path(image_path).stem
     save = _al_dir() / f"{stem}__al_v{version}.pth"
-    report = T.quick_finetune(items, from_ckpt=base_ckpt, save_ckpt=str(save), epochs=epochs)
+    report = T.quick_finetune_multihead(
+        items, bg_items or [], from_ckpt=base_ckpt, save_ckpt=str(save),
+        epochs=epochs, bg_epochs=bg_epochs,
+    )
     report["version"] = version
-
-    bg_save: Optional[str] = None
-    if bg_items:
-        bg_out = _al_dir() / f"{stem}__al_bg_v{version}.pth"
-        report["bg"] = T.quick_finetune_bg(
-            bg_items,
-            encoder_ckpt=base_ckpt,
-            from_bg_ckpt=from_bg_ckpt or DEFAULT_BG_CKPT,
-            save_ckpt=str(bg_out),
-            epochs=bg_epochs,
-        )
-        bg_save = str(bg_out)
-    return str(save), bg_save, report
+    return str(save), report
 
 
-def reanalyze(image_path: str, ckpt_path: str, bg_ckpt_path: Optional[str] = None):
+def reanalyze(image_path: str, ckpt_path: str):
     """
     Переинференс изображения дообученной моделью → AnalysisResult (маска +
     метрики + класс руды), как в pipeline.run_analysis, но с явным чекпоинтом и
     ОТДЕЛЬНОЙ выходной папкой (чтобы не затирать исходный результат «до»).
-    bg_ckpt_path — дообученная голова фона (если None, берётся вшитая).
+    ckpt_path — мультиголовый чекпоинт (encoder+head+bg_head в одном файле).
     """
     from ml_service import infer
 
@@ -260,11 +252,8 @@ def reanalyze(image_path: str, ckpt_path: str, bg_ckpt_path: Optional[str] = Non
     from . import metrics as metrics_mod
     from .schemas import AnalysisResult, MLResponse
 
-    tag = Path(bg_ckpt_path).stem if bg_ckpt_path else Path(ckpt_path).stem
-    out_dir = _al_dir() / "results" / tag
+    out_dir = _al_dir() / "results" / Path(ckpt_path).stem
     params: dict[str, Any] = {"ckpt": str(ckpt_path)}
-    if bg_ckpt_path:
-        params["bg_ckpt"] = str(bg_ckpt_path)
     raw = infer.analyze_image(str(image_path), out_dir=str(out_dir), params=params)
     if config.VALIDATE_ML_RESPONSE:
         contract.assert_valid(raw)
