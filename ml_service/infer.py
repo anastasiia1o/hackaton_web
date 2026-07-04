@@ -54,35 +54,33 @@ DEFAULT_MODE = os.getenv("ORE_ML_MODE_INFER", "grid")  # "grid" | "slide"
 # как оговорено в API_CONTRACT.md. 0.0 -> отключено (модель уверена почти всегда).
 CONF_THRESHOLD = float(os.getenv("ORE_ML_CONF_THRESHOLD", "0.0"))
 
-# Целокадровый вентиль фона применяется ТОЛЬКО к снимкам размера одного FOV
-# (отдельные фото руд по сортам ~2272×1704). Панорамы (≥13000 px по стороне)
-# проходят мимо: их grade-разбор идентичен прежнему (голова фона на панораме
-# ненадёжна). Порог по длинной стороне: заметно выше одного FOV, много ниже
-# панорамы (2272 << 4096 << 13000).
-BG_GATE_MAX_SIDE = int(os.getenv("ORE_ML_BG_GATE_MAX_SIDE", "4096"))
-
 MODEL_VERSION = "grade-se_resnext50-micronet-bg-0.2.0"
 
 
 # ── Тайлинг (адаптировано из ../ore_classification/panorama_infer.py) ─────────
-# Классификация СОРТА руды (0..2 индекс модели). Детекция фона — не здесь, а
-# целокадровым вентилем в analyze_image (см. model.bg_image_probability): голова
-# фона надёжна только на снимке-в-целом, а не на 512-px тайлах панорамы.
-def _run_grid(model, img_np, tile, batch_size):
+# Возвращают уже КОДЫ КОНТРАКТА (0 фон / 1 обычные / 2 тонкие / 3 тальк) и
+# уверенность 0..1 на ячейку. Детекция фона идёт ПО ТАЙЛАМ на любых снимках,
+# включая панорамы: тайл-фон (sigmoid(bg_head) > bg_thr) -> код 0, уверенность =
+# вероятность фона; иначе argmax головы сорта. bg_head=None -> режим «3 класса».
+def _run_grid(model, bg_head, img_np, tile, batch_size, bg_thr):
     """Непересекающаяся сетка тайлов; каждый тайл -> один класс. stride == tile."""
     H, W = img_np.shape[:2]
     rows = (H + tile - 1) // tile
     cols = (W + tile - 1) // tile
-    idx_labels = np.zeros((rows, cols), dtype=np.uint8)   # индекс выхода модели 0..2
+    grid_labels = np.zeros((rows, cols), dtype=np.uint8)   # коды контракта
     confs = np.zeros((rows, cols), dtype=np.float32)
 
     positions, tensors = [], []
 
     def flush(pos, tens):
-        p = M.infer_batch(model, tens)
-        for (r, c), pv in zip(pos, p):
-            idx_labels[r, c] = int(pv.argmax())
-            confs[r, c] = float(pv.max())
+        grade, bg = M.infer_batch_cascade(model, bg_head, tens)
+        for (r, c), gv, bv in zip(pos, grade, bg):
+            if bv > bg_thr:
+                grid_labels[r, c] = M.CONTRACT_BACKGROUND
+                confs[r, c] = float(bv)
+            else:
+                grid_labels[r, c] = M.MODEL_TO_CONTRACT[int(gv.argmax())]
+                confs[r, c] = float(gv.max())
 
     for r in range(rows):
         for c in range(cols):
@@ -96,10 +94,10 @@ def _run_grid(model, img_np, tile, batch_size):
     if tensors:
         flush(positions, tensors)
 
-    return idx_labels, confs, rows, cols, tile
+    return grid_labels, confs, rows, cols, tile
 
 
-def _run_slide(model, img_np, tile, batch_size):
+def _run_slide(model, bg_head, img_np, tile, batch_size, bg_thr):
     """Скользящее окно, шаг tile//2, soft-vote (сумма вероятностей) в перекрытиях."""
     H, W = img_np.shape[:2]
     stride = tile // 2
@@ -112,13 +110,15 @@ def _run_slide(model, img_np, tile, batch_size):
 
     rows, cols = len(ys), len(xs)
     prob_acc = np.zeros((rows, cols, 3), dtype=np.float32)
+    bg_grid = np.zeros((rows, cols), dtype=np.float32)
 
     positions, tensors = [], []
 
     def flush(pos, tens):
-        p = M.infer_batch(model, tens)
-        for (ri, ci), pv in zip(pos, p):
-            prob_acc[ri, ci] += pv
+        grade, bg = M.infer_batch_cascade(model, bg_head, tens)
+        for (ri, ci), gv, bv in zip(pos, grade, bg):
+            prob_acc[ri, ci] += gv
+            bg_grid[ri, ci] = float(bv)
 
     for ri, y0 in enumerate(ys):
         for ci, x0 in enumerate(xs):
@@ -133,7 +133,12 @@ def _run_slide(model, img_np, tile, batch_size):
 
     idx_labels = prob_acc.argmax(axis=2).astype(np.uint8)
     confs = prob_acc.max(axis=2) / np.maximum(prob_acc.sum(axis=2), 1e-6)
-    return idx_labels, confs, rows, cols, stride
+    grid_labels = M.MODEL_TO_CONTRACT[idx_labels].astype(np.uint8)
+    is_bg = bg_grid > bg_thr
+    grid_labels[is_bg] = M.CONTRACT_BACKGROUND
+    confs = confs.astype(np.float32)
+    confs[is_bg] = bg_grid[is_bg]
+    return grid_labels, confs, rows, cols, stride
 
 
 # ── Сборка объектов из сетки ─────────────────────────────────────────────────
@@ -215,43 +220,26 @@ def analyze_image(
 
     # Голова-детектор фона (общий энкодер). `bg_ckpt=""` в params отключает фон.
     # Энкодер при активном обучении заморожен -> bg_head совместим с дообученными
-    # чекпоинтами и грузится независимо от пути grade-весов.
+    # чекпоинтами и грузится независимо от пути grade-весов. Детекция фона идёт
+    # ПО ТАЙЛАМ на любых снимках, включая панорамы (см. _run_grid/_run_slide).
     bg_ckpt = params.get("bg_ckpt", M.DEFAULT_BG_CKPT)
     bg_head = M.load_bg_head(bg_ckpt) if bg_ckpt else None
-    gate_max_side = int(params.get("bg_gate_max_side", BG_GATE_MAX_SIDE))
 
-    # ── Целокадровый вентиль фона ──────────────────────────────────────────────
-    # Считаем bg_prob ОДИН раз на весь снимок и только для кадров размера одного
-    # FOV. Если это фон — весь снимок = код 0, grade-разбор не запускаем. Иначе
-    # (и всегда для панорам) идём обычным путём классификации сорта.
-    warnings: list[str] = []
-    bg_gated = bg_head is not None and max(W, H) <= gate_max_side
-    bg_prob = None
-    if bg_gated:
-        bg_prob = M.bg_image_probability(model, bg_head, img_np)
-
-    if bg_gated and bg_prob > bg_thr:
-        # Весь кадр — фон: тривиальная сетка кода 0 (без прогона grade-модели).
-        stride = tile
-        rows = (H + tile - 1) // tile
-        cols = (W + tile - 1) // tile
-        grid_labels = np.full((rows, cols), M.CONTRACT_BACKGROUND, dtype=np.uint8)
-        confs = np.full((rows, cols), float(bg_prob), dtype=np.float32)
-        warnings.append(
-            f"[warning] Снимок распознан как ФОН/нерудная матрица "
-            f"(P={bg_prob:.2f} ≥ {bg_thr:.2f}) — весь кадр помечен кодом 0."
+    if mode == "slide":
+        grid_labels, confs, rows, cols, stride = _run_slide(
+            model, bg_head, img_np, tile, batch, bg_thr
         )
     else:
-        if mode == "slide":
-            idx_labels, confs, rows, cols, stride = _run_slide(model, img_np, tile, batch)
-        else:
-            mode = "grid"
-            idx_labels, confs, rows, cols, stride = _run_grid(model, img_np, tile, batch)
-        # Индекс выхода модели (0..2) -> код класса контракта (1..3).
-        grid_labels = M.MODEL_TO_CONTRACT[idx_labels].astype(np.uint8)
+        mode = "grid"
+        grid_labels, confs, rows, cols, stride = _run_grid(
+            model, bg_head, img_np, tile, batch, bg_thr
+        )
 
+    # grid_labels уже в кодах контракта (0 фон / 1 / 2 / 3). confs — 0..1.
+    grid_labels = grid_labels.astype(np.uint8)
     grid_conf = np.clip(confs * 255.0, 0, 255).astype(np.uint8)
 
+    warnings: list[str] = []
     n_bg = int((grid_labels == M.CONTRACT_BACKGROUND).sum())
     if bg_head is None:
         warnings.append(
@@ -295,10 +283,7 @@ def analyze_image(
             "mode": mode, "tile": tile, "stride": stride,
             "batch": batch, "grid": [rows, cols], "device": M.device(),
             "bg_detector": bg_head is not None,
-            "bg_gate_applied": bool(bg_gated),
-            "bg_threshold": bg_thr,
-            "bg_prob": (round(bg_prob, 4) if bg_prob is not None else None),
-            "background_cells": n_bg,
+            "bg_threshold": bg_thr, "background_cells": n_bg,
         },
         "image_size": {"width": W, "height": H},
         "mask": str(mask_path.resolve()),
