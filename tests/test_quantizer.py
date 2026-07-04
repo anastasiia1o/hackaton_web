@@ -101,6 +101,44 @@ def test_cap_limits_number_of_patches():
     assert len(patches) <= 10
 
 
+def test_train_sized_image_one_class_returns_same_image():
+    # Вырожденный случай: кадр РОВНО train-размера, залит одним классом →
+    # модуль сэмплинга обязан вернуть ЭТУ ЖЕ картинку (без кропов/апскейла).
+    S = 64
+    arr = np.random.default_rng(3).integers(0, 255, (S, S, 3), dtype=np.uint8)
+    img = Image.fromarray(arr, mode="RGB")
+    M = np.ones((S, S), dtype=bool)
+    patches, reason = qz.quantize_region(M, img, config.CLASS_FINE, S=S)
+    assert reason == "ok"
+    assert len(patches) == 1
+    p = patches[0]
+    assert p.image.size == (S, S)
+    assert not p.upsampled
+    assert p.label == config.CLASS_FINE
+    assert np.array_equal(np.array(p.image), arr)   # ровно та же картинка
+
+
+def test_subtrain_image_one_class_upsampled_once():
+    # Кадр МЕНЬШЕ train-размера, один класс → один патч, апскейл до S (не набор).
+    S = 64
+    img = _image(40, 40)
+    M = np.ones((40, 40), dtype=bool)
+    patches, reason = qz.quantize_region(M, img, config.CLASS_TALC, S=S)
+    assert reason == "ok"
+    assert len(patches) == 1
+    assert patches[0].image.size == (S, S)
+    assert patches[0].upsampled
+
+
+def test_majority_trainable_class_picks_largest_area():
+    # Кадр train-размера с 2 классами → мажоритарный по площади (60/40 → FINE).
+    from src import dataset_storage as ds
+    mask = np.zeros((10, 10), dtype=np.uint8)
+    mask[:, :6] = config.CLASS_FINE       # 60%
+    mask[:, 6:] = config.CLASS_ORDINARY   # 40%
+    assert ds._majority_trainable_class(mask) == config.CLASS_FINE
+
+
 def test_never_crashes_on_garbage():
     # Не 2D / странная форма — инвариант «не падаем», возвращаем error-reason.
     img = _image(50, 50)

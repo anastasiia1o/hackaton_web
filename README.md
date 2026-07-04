@@ -34,19 +34,16 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # 4. Запустить сайт
-streamlit run app.py
+streamlit run OreVision.py
 ```
 
-Откроется браузер на `http://localhost:8501`. Нажмите
-**«Показать на демо-образце»** — увидите весь сценарий без загрузки файлов.
+Откроется браузер на `http://localhost:8501`. Загрузите изображение шлифа —
+его проанализирует **встроенная модель** классификации сортов руды
+(`ml_service/grade_unfreeze_best.pth`, вшита в репозиторий).
 
-По умолчанию включён **MOCK-режим**: ML имитируется локально, реальный сервис
-не нужен. Это позволяет показать продукт до готовности нейросети.
-
-### Пакетная обработка серии изображений
-```powershell
-python batch_process.py data\uploads --scenario refractory
-```
+MOCK-режима больше нет: по умолчанию модель считает **в процессе сайта**
+(`OREVISION_ML_MODE=local`), отдельный сервер не нужен. Нужен только torch-стек
+из `requirements.txt` (тяжёлый; можно поставить CPU-сборку torch).
 
 ### Тесты логики
 ```powershell
@@ -55,17 +52,19 @@ pytest -q
 
 ---
 
-## 2. Переключение на реальный ML
+## 2. Вынести инференс в отдельный сервис (опционально)
 
-Когда команда `orevision-ml` поднимет сервис на `http://localhost:8001`:
+По умолчанию всё считается локально. Если инференс хочется вынести на отдельную
+(например, GPU) машину — поднимите сервис из этого же репозитория:
 
 ```powershell
-$env:OREVISION_ML_MODE = "real"      # включить реальный режим
-streamlit run app.py
+python ml_service/server.py               # слушает :8001
+$env:OREVISION_ML_MODE = "real"           # сайт ходит в сервис по HTTP
+streamlit run OreVision.py
 ```
 
 Контракт запроса/ответа описан в [`API_CONTRACT.md`](API_CONTRACT.md).
-Он одинаков для mock и real — поэтому больше ничего менять не нужно.
+Он одинаков для local и real — поэтому больше ничего менять не нужно.
 
 ---
 
@@ -82,7 +81,7 @@ docker compose up --build
 `docker compose down`.
 
 **Если Docker не работает или не успеваете** — это не блокер. Показывайте
-demo обычным `streamlit run app.py` из раздела 1. Он не хуже для жюри.
+demo обычным `streamlit run OreVision.py` из раздела 1. Он не хуже для жюри.
 
 ---
 
@@ -90,7 +89,7 @@ demo обычным `streamlit run app.py` из раздела 1. Он не ху
 
 ```
 orevision-app/
-├── app.py                  # Streamlit: главный экран (поток B)
+├── OreVision.py                  # Streamlit: главный экран (поток B)
 ├── batch_process.py        # пакетная обработка серии изображений (CLI)
 ├── pages/                  # многостраничность Streamlit (поток B)
 │   ├── 1_Пакетная_обработка.py     # очередь импорта (папка/файлы через проводник) + batch
@@ -154,7 +153,7 @@ orevision-app/
 `stream-a/<задача>` — ветки логики, `stream-b/<задача>` — ветки UI.
 Прямо в `main` не коммитим.
 
-**Как двое не мешают друг другу:** поток A правит `src/`, поток B — `app.py`/`ui/`.
+**Как двое не мешают друг другу:** поток A правит `src/`, поток B — `OreVision.py`/`ui/`.
 Общая точка — `src/schemas.py` (менять только через запись в `HANDOFF.md`).
 Задачи и статусы — в `docs/coordination/BOARD.md`, решения — в `HANDOFF.md`.
 
@@ -244,8 +243,10 @@ S2_v2)» в трёх местах:
   или не установлены зависимости (`pip install -r requirements.txt`).
 - *PowerShell не даёт активировать venv* — выполните один раз:
   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
-- *ML-сервис недоступен в real-режиме* — сайт покажет красный индикатор;
-  вернитесь в mock (`$env:OREVISION_ML_MODE="mock"`).
+- *Красный индикатор модели* — в local-режиме не установлен torch
+  (`pip install -r requirements.txt`) или нет файла весов
+  `ml_service/grade_unfreeze_best.pth`; в real-режиме не поднят
+  `python ml_service/server.py`.
 - *Большая панорама (проверено до ~570 Мп)* — сайт грузит уменьшенное превью
   (≤2600px по стороне) с zoom/pan и minimap; детальный просмотр участка в
   исходном разрешении — кнопка «🔬 Инспектор участка». Расчёт метрик по маске

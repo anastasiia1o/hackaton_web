@@ -1,0 +1,259 @@
+<!doctype html>
+<!--
+  OreVision — АННОТАТОР с зумом (интерфейс в духе GUI matplotlib).
+
+  Одно SVG-полотно: растр (<image>), уже подписанные контуры (committed) и
+  текущая линия рисуются в ОДНОЙ системе координат изображения, а зум — это
+  просто смена `viewBox`, поэтому масштаб применяется к картинке и разметке
+  одинаково. Панель инструментов сверху:
+
+    • Оригинал / Оверлей — переключение показываемого слоя (без rerun Python);
+    • Лупа / Лассо       — инструмент: прямоугольный зум ИЛИ обводка области;
+    • Сброс зума         — вернуть полный кадр.
+
+  Лупа: тянем прямоугольник → выбранная область растягивается на весь кадр.
+  Лассо: обводим замкнутую область → точки уходят в Python в ДОЛЯХ 0..1 от
+  ПОЛНОГО изображения (не от текущего зума), поэтому разметка всегда точна
+  независимо от того, как сильно приближено. ПКМ — отменить.
+
+  Dependency-free vanilla JS, тот же ручной протокол Streamlit Components, что и
+  lasso_picker_frontend.
+-->
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #wrap { position: relative; width: 100%; }
+  #bar {
+    display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+    padding: 6px 4px; font: 13px system-ui, sans-serif; color: #d5d8de;
+  }
+  #bar button {
+    font: 12px system-ui, sans-serif; padding: 4px 10px; border-radius: 6px;
+    border: 1px solid #4a4f5a; background: #262a33; color: #d5d8de; cursor: pointer;
+  }
+  #bar button.on { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+  #bar .sep { width: 1px; height: 18px; background: #4a4f5a; margin: 0 4px; }
+  #bar .hint { color: #8b909b; margin-left: auto; }
+  #stagewrap { position: relative; width: 100%; line-height: 0; }
+  svg { display: block; width: 100%; height: auto; background: #0e1013; border-radius: 6px; touch-action: none; }
+  #svg.tool-zoom { cursor: crosshair; }
+  #svg.tool-lasso { cursor: crosshair; }
+  .committed-label {
+    font: 13px system-ui, sans-serif; paint-order: stroke; stroke: #000;
+    stroke-width: 3px; fill: #fff; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="bar">
+    <button id="btnOverlay" type="button">Оверлей</button>
+    <button id="btnOriginal" type="button">Оригинал</button>
+    <span class="sep"></span>
+    <button id="btnZoom" type="button">🔍 Лупа</button>
+    <button id="btnLasso" type="button">✎ Лассо</button>
+    <button id="btnReset" type="button">Сброс зума</button>
+    <span class="hint" id="hint">Лупа: выделите прямоугольник · Лассо: обведите область · ПКМ — отмена</span>
+  </div>
+  <div id="stagewrap">
+    <svg id="svg" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="none"></svg>
+  </div>
+</div>
+<script>
+(function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  var svg = document.getElementById('svg');
+
+  var W = 1, H = 1;
+  var overlaySrc = null, originalSrc = null;
+  var view = 'overlay';        // 'overlay' | 'original'
+  var tool = 'lasso';          // 'lasso' | 'zoom'
+  var vb = { x: 0, y: 0, w: 1, h: 1 };   // текущий viewBox в пикселях изображения
+  var committedRaw = [];
+  var color = 'rgba(255, 210, 60, .30)', borderColor = '#ffcf33';
+
+  var drawing = false, current = [], zoomStart = null, zoomRect = null;
+
+  function post(m) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, m), '*'); }
+  function round4(v) { return Math.round(v * 10000) / 10000; }
+
+  function setFrame() {
+    // Высоту кадра держим по аспекту ПОЛНОГО изображения: полный вид не искажён,
+    // а приближённый прямоугольник (иного аспекта) растягивается на тот же кадр.
+    var wpx = svg.clientWidth || svg.getBoundingClientRect().width || 600;
+    var hpx = Math.max(120, Math.round(wpx * H / W));
+    svg.style.height = hpx + 'px';
+    post({ type: 'streamlit:setFrameHeight', height: hpx + document.getElementById('bar').offsetHeight + 12 });
+  }
+
+  function loc(e) {
+    // Экран → координаты изображения (учитывает и зум, и растяжение).
+    var p = svg.createSVGPoint(); p.x = e.clientX; p.y = e.clientY;
+    var m = svg.getScreenCTM();
+    if (!m) return [0, 0];
+    var q = p.matrixTransform(m.inverse());
+    return [Math.max(0, Math.min(W, q.x)), Math.max(0, Math.min(H, q.y))];
+  }
+
+  function pathD(pts) {
+    if (!pts.length) return '';
+    var d = 'M ' + pts[0][0].toFixed(1) + ' ' + pts[0][1].toFixed(1);
+    for (var i = 1; i < pts.length; i++) d += ' L ' + pts[i][0].toFixed(1) + ' ' + pts[i][1].toFixed(1);
+    return d + ' Z';
+  }
+  function centroid(pts) {
+    var sx = 0, sy = 0; pts.forEach(function (p) { sx += p[0]; sy += p[1]; });
+    return [sx / pts.length, sy / pts.length];
+  }
+  function el(name, attrs) {
+    var n = document.createElementNS(NS, name);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+
+  function render() {
+    svg.setAttribute('viewBox', vb.x + ' ' + vb.y + ' ' + vb.w + ' ' + vb.h);
+    svg.setAttribute('class', 'tool-' + tool);
+    svg.innerHTML = '';
+    var scale = vb.w / (W || 1);   // 1 = полный кадр, <1 = приближено (тоньше линии)
+
+    svg.appendChild(el('image', {
+      href: (view === 'original' ? originalSrc : overlaySrc) || '',
+      x: 0, y: 0, width: W, height: H, preserveAspectRatio: 'none',
+    })).setAttributeNS('http://www.w3.org/1999/xlink', 'href',
+      (view === 'original' ? originalSrc : overlaySrc) || '');
+
+    committedRaw.forEach(function (s) {
+      var pts = (s.points || []).map(function (p) { return [p[0] * W, p[1] * H]; });
+      if (pts.length < 3) return;
+      svg.appendChild(el('path', {
+        d: pathD(pts), fill: s.color || 'rgba(60,160,255,.30)',
+        stroke: s.border_color || '#3aa0ff', 'stroke-width': Math.max(0.5, 2 * scale),
+      }));
+      if (s.label) {
+        var c = centroid(pts);
+        var t = el('text', { x: c[0], y: c[1], 'text-anchor': 'middle', class: 'committed-label' });
+        t.setAttribute('font-size', Math.max(8, 13 * scale));
+        t.setAttribute('stroke-width', Math.max(1, 3 * scale));
+        t.textContent = s.label; svg.appendChild(t);
+      }
+    });
+
+    if (current.length > 1) {
+      svg.appendChild(el('path', {
+        d: pathD(current), fill: color, stroke: borderColor,
+        'stroke-width': Math.max(0.5, 2.5 * scale), 'stroke-dasharray': Math.max(2, 5 * scale),
+      }));
+    }
+    if (zoomRect) {
+      svg.appendChild(el('rect', {
+        x: zoomRect.x, y: zoomRect.y, width: zoomRect.w, height: zoomRect.h,
+        fill: 'rgba(59,130,246,.15)', stroke: '#3b82f6',
+        'stroke-width': Math.max(0.5, 2 * scale), 'stroke-dasharray': Math.max(2, 5 * scale),
+      }));
+    }
+  }
+
+  function sendLasso() {
+    if (current.length < 3) return;
+    var xs = current.map(function (p) { return p[0] / W; });
+    var ys = current.map(function (p) { return p[1] / H; });
+    post({
+      type: 'streamlit:setComponentValue',
+      value: {
+        points: current.map(function (p) { return [round4(p[0] / W), round4(p[1] / H)]; }),
+        bbox: [round4(Math.min.apply(null, xs)), round4(Math.min.apply(null, ys)),
+               round4(Math.max.apply(null, xs)), round4(Math.max.apply(null, ys))],
+        nonce: Date.now(),
+      },
+    });
+  }
+
+  // ── Указатель: рисуем лассо или тянем прямоугольник зума ──────────────────
+  svg.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0) return;
+    svg.setPointerCapture(e.pointerId);
+    var p = loc(e); drawing = true;
+    if (tool === 'zoom') { zoomStart = p; zoomRect = { x: p[0], y: p[1], w: 0, h: 0 }; }
+    else { current = [p]; }
+    render(); e.preventDefault();
+  });
+  svg.addEventListener('pointermove', function (e) {
+    if (!drawing) return;
+    var p = loc(e);
+    if (tool === 'zoom') {
+      zoomRect = { x: Math.min(zoomStart[0], p[0]), y: Math.min(zoomStart[1], p[1]),
+                   w: Math.abs(p[0] - zoomStart[0]), h: Math.abs(p[1] - zoomStart[1]) };
+    } else {
+      var last = current[current.length - 1];
+      var minStep = 4 * (vb.w / (svg.clientWidth || W));   // ~4 экранных px
+      if (Math.hypot(p[0] - last[0], p[1] - last[1]) >= minStep) current.push(p);
+    }
+    render();
+  });
+  function endDraw() {
+    if (!drawing) return; drawing = false;
+    if (tool === 'zoom') {
+      if (zoomRect && zoomRect.w > W * 0.01 && zoomRect.h > H * 0.01) {
+        vb = { x: zoomRect.x, y: zoomRect.y, w: zoomRect.w, h: zoomRect.h };
+      }
+      zoomRect = null; zoomStart = null; render();
+    } else {
+      if (current.length >= 3) { render(); sendLasso(); }
+      else { current = []; render(); }
+    }
+  }
+  svg.addEventListener('pointerup', endDraw);
+  svg.addEventListener('pointercancel', endDraw);
+  svg.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    var had = current.length > 0; current = []; zoomRect = null; drawing = false; render();
+    if (had) post({ type: 'streamlit:setComponentValue', value: null });
+  });
+
+  // ── Панель инструментов ───────────────────────────────────────────────────
+  function refreshButtons() {
+    document.getElementById('btnOverlay').className = view === 'overlay' ? 'on' : '';
+    document.getElementById('btnOriginal').className = view === 'original' ? 'on' : '';
+    document.getElementById('btnZoom').className = tool === 'zoom' ? 'on' : '';
+    document.getElementById('btnLasso').className = tool === 'lasso' ? 'on' : '';
+  }
+  document.getElementById('btnOverlay').onclick = function () { view = 'overlay'; refreshButtons(); render(); };
+  document.getElementById('btnOriginal').onclick = function () { view = 'original'; refreshButtons(); render(); };
+  document.getElementById('btnZoom').onclick = function () { tool = 'zoom'; current = []; refreshButtons(); render(); };
+  document.getElementById('btnLasso').onclick = function () { tool = 'lasso'; zoomRect = null; refreshButtons(); render(); };
+  document.getElementById('btnReset').onclick = function () { vb = { x: 0, y: 0, w: W, h: H }; render(); };
+
+  function applyArgs(a) {
+    a = a || {};
+    if (a.color) color = a.color;
+    if (a.border_color) borderColor = a.border_color;
+    committedRaw = a.committed || [];
+    if (a.tool && (a.tool === 'zoom' || a.tool === 'lasso')) tool = a.tool;
+    var srcChanged = (a.overlay_src && a.overlay_src !== overlaySrc) ||
+                     (a.original_src && a.original_src !== originalSrc);
+    overlaySrc = a.overlay_src || overlaySrc;
+    originalSrc = a.original_src || overlaySrc;
+    var dimChanged = (a.width && a.width !== W) || (a.height && a.height !== H);
+    if (a.width) W = a.width; if (a.height) H = a.height;
+    if (dimChanged) { vb = { x: 0, y: 0, w: W, h: H }; }
+    if (srcChanged) { current = []; }
+    refreshButtons(); setFrame(); render();
+  }
+
+  window.addEventListener('message', function (event) {
+    var d = event.data;
+    if (!d || d.type !== 'streamlit:render') return;
+    applyArgs(d.args);
+  });
+  window.addEventListener('resize', function () { setFrame(); render(); });
+
+  refreshButtons();
+  post({ type: 'streamlit:componentReady', apiVersion: 1 });
+  setFrame();
+})();
+</script>
+</body>
+</html>

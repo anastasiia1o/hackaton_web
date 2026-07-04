@@ -41,7 +41,7 @@ pip install -r ml_service/requirements.txt
 python ml_service/server.py
 
 # 4. В ДРУГОМ терминале — сайт в real-режиме:
-OREVISION_ML_MODE=real streamlit run app.py
+OREVISION_ML_MODE=real streamlit run OreVision.py
 ```
 
 В сайдбаре сайта индикатор ML станет зелёным (он опрашивает `GET /health`).
