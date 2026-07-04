@@ -402,6 +402,151 @@ def finetune(
 
 
 # --------------------------------------------------------------------------- #
+# Быстрое дообучение головы (интерактивное активное обучение на странице OreVision)
+# --------------------------------------------------------------------------- #
+# Полный finetune() разогревает энкодер и идёт минуты — для интерактивного цикла
+# «правка эксперта → сразу результат» это слишком долго. Здесь энкодер ЗАМОРОЖЕН,
+# его признаки (2048-D) считаются ОДИН раз на патч, а обучается только голова
+# (Linear 2048→256→3) — это быстро даже на CPU и не разрушает энкодер.
+
+def _square_crops(pil, k: int, rng: random.Random) -> list[np.ndarray]:
+    """k квадратных кропов патча -> массивы (IMG_SIZE,IMG_SIZE,3) float32.
+
+    При k<=1 — центральный кроп без аугментаций; иначе случайные кропы + флипы/
+    повороты (лёгкая аугментация, чтобы голова не переобучилась на один кадр).
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    W, H = pil.size
+    side = min(W, H)
+    arrs = []
+    for _ in range(max(1, k)):
+        if k <= 1 or W == side and H == side:
+            x0, y0 = (W - side) // 2, (H - side) // 2
+        else:
+            x0 = rng.randint(0, W - side)
+            y0 = rng.randint(0, H - side)
+        crop = pil.crop((x0, y0, x0 + side, y0 + side)).resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
+        arr = np.array(crop, dtype=np.float32)
+        if k > 1:
+            if rng.random() > 0.5:
+                arr = arr[:, ::-1].copy()
+            if rng.random() > 0.5:
+                arr = arr[::-1].copy()
+            if rng.random() > 0.5:
+                arr = np.rot90(arr, rng.randint(1, 3)).copy()
+        arrs.append(arr)
+    return arrs
+
+
+def encode_features(model, items, *, augment_k: int = 6, dev=None, batch: int = 16, seed: int = 42):
+    """
+    items: [(PIL.Image, model_idx, weight), ...]. Возвращает (feats, labels, weights)
+    как torch-тензоры: feats (N,2048) — выход замороженного энкодера + avgpool,
+    N = число_патчей × augment_k. Считается один раз, дальше учим только голову.
+    """
+    torch = _torch()
+    dev = dev or device()
+    rng = random.Random(seed)
+
+    tensors, labels, weights = [], [], []
+    for pil, idx, wt in items:
+        for arr in _square_crops(pil, augment_k, rng):
+            a = (arr / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
+            tensors.append(torch.from_numpy(a.transpose(2, 0, 1)))
+            labels.append(int(idx))
+            weights.append(float(wt))
+
+    feats = []
+    model.eval()
+    with torch.no_grad():
+        for i in range(0, len(tensors), batch):
+            b = torch.stack(tensors[i:i + batch]).to(dev)
+            f = model.pool(model.encoder(b)[-1]).view(b.size(0), -1)
+            feats.append(f.cpu())
+    feats_t = torch.cat(feats, 0) if feats else torch.zeros((0, 2048))
+    return (feats_t,
+            torch.tensor(labels, dtype=torch.long),
+            torch.tensor(weights, dtype=torch.float32))
+
+
+def quick_finetune(
+    items,
+    *,
+    from_ckpt: str = DEFAULT_CKPT,
+    save_ckpt: str,
+    epochs: int = 60,
+    lr: float = 1e-3,
+    augment_k: int = 6,
+    seed: int = 42,
+    log=print,
+) -> dict:
+    """
+    Быстрое дообучение ТОЛЬКО головы на патчах эксперта (+ якорях) и сохранение
+    полного чекпоинта (энкодер без изменений + новая голова). Возвращает отчёт.
+
+    items: [(PIL.Image, model_idx, weight), ...] — исправления эксперта идут с
+    большим весом, «якоря» (текущее предсказание модели на случайных тайлах) — с
+    малым, чтобы дообучение не схлопнуло все классы в исправленный.
+    """
+    torch = _torch()
+    import torch.nn as nn  # noqa: PLC0415
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    dev = device()
+
+    model = _build_module().to(dev)
+    if from_ckpt and os.path.exists(from_ckpt):
+        model.load_state_dict(torch.load(from_ckpt, map_location=dev, weights_only=True))
+        log(f"Старт с чекпоинта: {from_ckpt}")
+    else:
+        log(f"[WARN] Чекпоинт {from_ckpt} не найден — голова обучается с нуля")
+    for p in model.encoder.parameters():
+        p.requires_grad = False
+
+    feats, labels, weights = encode_features(model, items, augment_k=augment_k, dev=dev, seed=seed)
+    if feats.shape[0] == 0:
+        raise ValueError("нет обучающих патчей для дообучения")
+    feats, labels, weights = feats.to(dev), labels.to(dev), weights.to(dev)
+
+    counts = [max(1, int((labels == c).sum())) for c in range(3)]
+    cw = torch.tensor([1.0 / c for c in counts], dtype=torch.float32)
+    cw = cw / cw.mean()
+    criterion = nn.CrossEntropyLoss(weight=cw.to(dev), reduction="none")
+    optimizer = torch.optim.Adam(model.head.parameters(), lr=lr)
+
+    model.head.train()
+    losses = []
+    for _ep in range(1, epochs + 1):
+        optimizer.zero_grad()
+        loss = (criterion(model.head(feats), labels) * weights).mean()
+        loss.backward()
+        optimizer.step()
+        losses.append(float(loss.item()))
+
+    model.eval()
+    with torch.no_grad():
+        acc = float((model.head(feats).argmax(1) == labels).float().mean())
+
+    Path(save_ckpt).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), str(save_ckpt))
+    log(f"✓ сохранён {save_ckpt}  loss={losses[-1]:.4f}  train_acc={acc:.3f}")
+
+    return {
+        "save_ckpt": str(save_ckpt),
+        "from_ckpt": from_ckpt,
+        "num_patches": len(items),
+        "num_feature_vectors": int(feats.shape[0]),
+        "epochs": epochs,
+        "final_loss": round(losses[-1], 4),
+        "train_acc": round(acc, 4),
+        "class_counts": {MODEL_CLASS_NAMES[c]: counts[c] for c in range(3)},
+    }
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 

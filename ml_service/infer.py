@@ -196,7 +196,11 @@ def analyze_image(
     W, H = img.size
     img_np = np.array(img)
 
-    model = M.load_model()
+    # `ckpt` — опциональный путь к весам (активное обучение переинференсит
+    # дообученной моделью). load_model кешируется по пути, поэтому базовая модель
+    # и дообученные версии сосуществуют в памяти без коллизий.
+    ckpt = params.get("ckpt")
+    model = M.load_model(ckpt) if ckpt else M.load_model()
     if mode == "slide":
         idx_labels, confs, rows, cols, stride = _run_slide(model, img_np, tile, batch)
     else:
