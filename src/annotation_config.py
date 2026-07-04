@@ -7,10 +7,12 @@ ANNOTATION CONFIG — классы разметки для второго эта
 повреждён — используются встроенные значения по умолчанию (те же самые), чтобы
 редактор разметки не падал на "чистой" машине.
 
-Это НЕ то же самое, что src/config.py:CLASS_NAMES/CLASS_COLORS — те коды
-описывают классы ПЕРВОГО этапа (пиксельная сегментация фаз/выход ML), а классы
-здесь — итоговые категории ВТОРОГО этапа для ручной/active-learning разметки
-(тальк, обычные/тонкие срастания, неопределённая, неразмеченная область).
+В patch-AL концепции (см. docs/PATCH_AL_REDESIGN.md, §3) id разметки —
+это ЕДИНОЕ пространство кодов с контрактом ML (src/config.py:CLASS_*): один и
+тот же код используют модель, разметка и маска. Поэтому здесь id совпадают с
+config.CLASS_BACKGROUND/ORDINARY/FINE/TALC/ARTIFACT (0..4), а «uncertain»
+(неопределённая область эксперта) занимает код артефакта (4) — такие патчи в
+трейн не идут, а переводят регион в статус needs_expert_review.
 """
 
 from __future__ import annotations
@@ -24,15 +26,25 @@ from . import config
 
 DEFAULT_CONFIG_PATH = config.BASE_DIR / "configs" / "annotation_classes.json"
 
+# id ДОЛЖНЫ совпадать с кодами контракта (config.CLASS_*) — единый источник для
+# модели, разметки и маски. Цвета взяты из config.CLASS_COLORS (та же семантика:
+# обычные=зелёный, тонкие=красный, тальк=синий), непрозрачность поднята для
+# редактора разметки.
 _DEFAULT_CLASSES: list[dict[str, Any]] = [
-    {"id": 0, "name": "unlabeled", "name_ru": "Неразмеченная область", "color": [0, 0, 0, 0]},
-    {"id": 1, "name": "talc", "name_ru": "Тальк", "color": [30, 90, 230, 190]},
-    {"id": 2, "name": "ordinary_intergrowth", "name_ru": "Обычные срастания", "color": [0, 200, 0, 190]},
-    {"id": 3, "name": "fine_intergrowth", "name_ru": "Тонкие срастания", "color": [220, 30, 30, 190]},
-    {"id": 4, "name": "uncertain", "name_ru": "Неопределённая область / требует проверки", "color": [255, 165, 0, 190]},
+    {"id": config.CLASS_BACKGROUND, "name": "unlabeled", "name_ru": "Неразмеченная область / фон", "color": [0, 0, 0, 0]},
+    {"id": config.CLASS_ORDINARY, "name": "ordinary_intergrowth", "name_ru": "Обычные срастания", "color": [0, 200, 0, 190]},
+    {"id": config.CLASS_FINE, "name": "fine_intergrowth", "name_ru": "Тонкие срастания", "color": [220, 30, 30, 190]},
+    {"id": config.CLASS_TALC, "name": "talc", "name_ru": "Тальк", "color": [30, 90, 230, 190]},
+    {"id": config.CLASS_ARTIFACT, "name": "uncertain", "name_ru": "Неопределённая область / требует проверки", "color": [255, 165, 0, 190]},
 ]
 
-UNLABELED_ID = 0
+UNLABELED_ID = config.CLASS_BACKGROUND
+# Код «неопределённой» области эксперта = код артефакта контракта: в обучающий
+# набор такие патчи не попадают (см. TRAINABLE_CLASS_IDS ниже), а регион
+# помечается на экспертную проверку.
+UNCERTAIN_ID = config.CLASS_ARTIFACT
+# Классы, патчи которых реально идут в дообучение (без фона и неопределённой).
+TRAINABLE_CLASS_IDS = (config.CLASS_ORDINARY, config.CLASS_FINE, config.CLASS_TALC)
 
 # Статусы жизненного цикла разметки одного региона (ROI).
 STATUS_DRAFT = "draft"

@@ -17,6 +17,8 @@ DATASET EXPORT — экспорт результатов в формате «к�
 
 from __future__ import annotations
 
+import csv
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -24,6 +26,12 @@ from typing import Any, Iterable, Optional
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+# Колонки manifest.csv для ImageFolder-экспорта patch-AL (см. write_imagefolder).
+PATCH_MANIFEST_FIELDS = [
+    "path", "label", "label_name", "weight",
+    "source_image", "region", "x", "y", "inside", "upsampled", "source_size",
+]
 
 
 def majority_class_in_polygon(
@@ -196,6 +204,58 @@ def export_s2_bundle(
         count += 1
 
     return {"dir": str(out_dir), "num_items": count}
+
+
+def write_imagefolder(
+    out_dir: Path,
+    records: Iterable[dict[str, Any]],
+    classes_json: dict[str, Any],
+    *,
+    quality: int = 92,
+) -> dict:
+    """
+    Записать patch-AL датасет в формате `ImageFolder` (который ест train.py):
+
+        imgs/<label_name>/<stem>.jpg     — патч train-разрешения
+        manifest.csv                     — path,label,weight,source_image,region,x,y,inside,upsampled,...
+        classes.json                     — карта классов
+
+    records: итерируемое словарей
+        {"image": PIL.Image, "label_name": str, "stem": str, "label": int,
+         "weight": float, "source_image": str, "region": str, "x": int, "y": int,
+         "inside": float, "upsampled": bool, "source_size": int}
+    Элементы обрабатываются по одному (крупный экспорт не держим в RAM целиком).
+    Возвращает {"dir", "num_patches", "num_classes"}.
+    """
+    out_dir = Path(out_dir)
+    imgs_root = out_dir / "imgs"
+    imgs_root.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict[str, Any]] = []
+    used_labels: set[str] = set()
+    for rec in records:
+        label_name = str(rec["label_name"])
+        stem = str(rec["stem"])
+        cls_dir = imgs_root / label_name
+        cls_dir.mkdir(parents=True, exist_ok=True)
+        rel = f"imgs/{label_name}/{stem}.jpg"
+        rec["image"].convert("RGB").save(out_dir / rel, quality=quality)
+        used_labels.add(label_name)
+        row = {k: rec.get(k, "") for k in PATCH_MANIFEST_FIELDS}
+        row["path"] = rel
+        rows.append(row)
+
+    csv_path = out_dir / "manifest.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=PATCH_MANIFEST_FIELDS)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+    (out_dir / "classes.json").write_text(
+        json.dumps(classes_json, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return {"dir": str(out_dir), "num_patches": len(rows), "num_classes": len(used_labels)}
 
 
 def zip_directory(dir_path: Path) -> bytes:

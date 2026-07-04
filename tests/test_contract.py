@@ -60,3 +60,30 @@ def test_assert_valid_raises(tmp_path):
         assert False, "ожидалась ContractError"
     except ContractError as e:
         assert "model_version" in str(e)
+
+
+def test_patch_grid_present_and_valid(tmp_path):
+    """mock (patch-clf) отдаёт patch_grid; на валидном ответе — без ошибок."""
+    resp = _good_response(tmp_path)
+    assert "patch_grid" in resp
+    pg = resp["patch_grid"]
+    assert {"tile", "stride", "rows", "cols", "labels"} <= set(pg)
+    errors = [e for e in validate_ml_response(resp) if not e.startswith("[warning]")]
+    assert errors == []
+
+
+def test_patch_grid_size_mismatch_detected(tmp_path):
+    resp = _good_response(tmp_path)
+    resp["patch_grid"]["rows"] = 999   # не совпадает с реальным labels.png
+    errors = validate_ml_response(resp)
+    assert any("labels" in e and "не совпадает" in e for e in errors)
+
+
+def test_missing_patch_grid_is_only_warning(tmp_path):
+    """Старый пиксельный ML без patch_grid остаётся валидным (только warning)."""
+    resp = _good_response(tmp_path)
+    del resp["patch_grid"]
+    errors = validate_ml_response(resp)
+    hard = [e for e in errors if not e.startswith("[warning]")]
+    assert hard == []
+    assert any("patch_grid" in e and e.startswith("[warning]") for e in errors)

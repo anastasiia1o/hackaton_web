@@ -9,6 +9,13 @@
 > пикселях, уверенность. **Проценты и класс руды считает САЙТ** (rule-based).
 > ML НЕ возвращает `talc_percent` и НЕ решает, оталькованная руда или нет.
 
+> **Контракт v2 (patch-classification).** Модель классифицирует не пиксели, а
+> квадратные **патчи** train-разрешения. Поэтому `mask` теперь **блочная** —
+> это сетка патч-классов, растянутая nearest'ом до полного разрешения (для
+> `metrics.py`/`classification.py` она неотличима от пиксельной, поэтому нижняя
+> половина сайта НЕ меняется). Дополнительно ML отдаёт сырой квантованный вывод
+> в поле **`patch_grid`**. См. `docs/PATCH_AL_REDESIGN.md`.
+
 ## Endpoint
 
 ```
@@ -35,8 +42,17 @@ Content-Type: multipart/form-data
   "image_size": { "width": 10000, "height": 8000 },
 
   // Тяжёлые данные передаются ФАЙЛАМИ/ПУТЯМИ, не массивами в JSON:
-  "mask": "….png",                       // PNG, где ЗНАЧЕНИЕ пикселя = код класса
-  "confidence_map": "….png",             // grayscale-PNG, яркость = уверенность
+  "mask": "….png",                       // БЛОЧНАЯ PNG-маска: значение пикселя = код
+                                          //   класса; = patch_grid.labels, апскейл nearest
+  "confidence_map": "….png",             // grayscale-PNG; = patch_grid.conf, апскейл nearest
+
+  "patch_grid": {                        // v2: сырой квантованный вывод модели
+    "tile": 2272, "stride": 2272,        //   окно и шаг патча в пикселях исходника
+    "rows": 6, "cols": 9,                //   размер сетки патчей
+    "origin": [0, 0],                    //   левый-верх первого патча (коорд. исходника)
+    "labels": "grid_labels.png",         //   PNG rows×cols, пиксель = код класса
+    "conf":   "grid_conf.png"            //   PNG rows×cols, яркость = уверенность 0..255
+  },
 
   "class_legend": {                      // расшифровка кодов (см. ниже)
     "0": "фон / нерудная матрица",
@@ -46,13 +62,23 @@ Content-Type: multipart/form-data
     "4": "артефакт / исключено"
   },
 
-  "objects": [                           // список найденных включений
+  "objects": [                           // связные компоненты одноклассовых патчей
     { "id": 0, "class": 1, "bbox": [x, y, w, h], "area_px": 12045, "confidence": 0.94 }
   ],
 
   "warnings": [ "неравномерное освещение в правом верхнем углу" ]
 }
 ```
+
+### `patch_grid` — сырой вывод patch-classification (v2)
+
+`patch_grid` **опционально** (пиксельный ML без него остаётся валидным — это
+только предупреждение валидатора), но patch-clf модель и mock его отдают.
+Валидатор (`src/contract.py`) проверяет: `size(labels) == rows×cols`, коды
+классов в `labels` ∈ `class_legend`, и (для небольших сеток) что `mask` совпадает
+с nearest-апскейлом `labels`. Патч с `conf < τ` модель помечает кодом `4`
+(артефакт/неуверенно); в active learning такие патчи поднимаются наверх worklist
+(`src/active_query.py`).
 
 ### Коды классов (class_legend) — ЗАФИКСИРОВАНЫ
 
@@ -85,4 +111,10 @@ Content-Type: multipart/form-data
 ## Версионирование контракта
 
 Любое изменение этого файла — только через запись в
-`docs/coordination/HANDOFF.md` и уведомление обеих команд. Текущая версия: **v1**.
+`docs/coordination/HANDOFF.md` и уведомление обеих команд. Текущая версия: **v2**.
+
+- **v1 → v2** (patch-classification): `mask` стала блочной (апскейл сетки
+  патчей), добавлено поле `patch_grid` (`tile/stride/rows/cols/origin/labels/
+  conf`). Обратная совместимость: `mask/confidence_map/objects` остаются
+  валидными; отсутствие `patch_grid` — только предупреждение. Нижняя половина
+  сайта (`metrics.py`/`classification.py`) не изменилась.

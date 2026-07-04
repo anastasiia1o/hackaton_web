@@ -116,6 +116,79 @@ def _safe_div(a: float, b: float) -> float:
     return float(a) / float(b) if b else 0.0
 
 
+def _grid_tile(h: int, w: int, params: dict[str, Any]) -> int:
+    """
+    Сторона патча (в пикселях) для нарезки сетки. Реальная модель берёт одно
+    train-FOV (config.PATCH_SIZE); демо-картинки маленькие, поэтому для наглядной
+    БЛОЧНОЙ маски дробим короткую сторону на config.MOCK_PATCH_GRID_CELLS ячеек.
+    Можно переопределить через params["tile"].
+    """
+    tile = params.get("tile")
+    if tile:
+        return max(1, int(tile))
+    return max(1, min(h, w) // max(1, config.MOCK_PATCH_GRID_CELLS))
+
+
+def _quantize_to_grid(
+    mask: np.ndarray, conf: np.ndarray, tile: int
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """
+    Свернуть пиксельную маску/уверенность в сетку патчей: каждой ячейке —
+    ПРЕОБЛАДАЮЩИЙ класс и СРЕДНЯЯ уверенность. Это ровно тот квантованный вывод,
+    который отдаёт patch-classification модель (labels/conf в patch_grid).
+    Возвращает (grid_labels, grid_conf, rows, cols).
+    """
+    h, w = mask.shape
+    rows = max(1, (h + tile - 1) // tile)
+    cols = max(1, (w + tile - 1) // tile)
+    grid_labels = np.zeros((rows, cols), dtype=np.uint8)
+    grid_conf = np.full((rows, cols), 255, dtype=np.uint8)
+    for r in range(rows):
+        y0, y1 = r * tile, min((r + 1) * tile, h)
+        for c in range(cols):
+            x0, x1 = c * tile, min((c + 1) * tile, w)
+            cell = mask[y0:y1, x0:x1]
+            if cell.size == 0:
+                continue
+            counts = np.bincount(cell.reshape(-1), minlength=5)
+            grid_labels[r, c] = int(np.argmax(counts))
+            grid_conf[r, c] = int(round(float(conf[y0:y1, x0:x1].mean())))
+    return grid_labels, grid_conf, rows, cols
+
+
+def _upsample_nearest(grid: np.ndarray, w: int, h: int) -> np.ndarray:
+    """Растянуть сетку rows×cols до (h, w) методом ближайшего соседа."""
+    return np.array(
+        Image.fromarray(grid.astype(np.uint8), mode="L").resize((w, h), Image.NEAREST),
+        dtype=np.uint8,
+    )
+
+
+def _objects_from_block_mask(mask: np.ndarray, conf: np.ndarray) -> list[dict]:
+    """
+    Связные компоненты одноклассовых блоков → objects[] (грубые, гранулярностью
+    патча — как и оговорено в контракте). Уверенность объекта = средняя по conf.
+    """
+    from scipy import ndimage
+
+    objects: list[dict] = []
+    for cls in (config.CLASS_ORDINARY, config.CLASS_FINE, config.CLASS_TALC, config.CLASS_ARTIFACT):
+        labeled, n = ndimage.label(mask == cls)
+        for comp in range(1, n + 1):
+            ys, xs = np.where(labeled == comp)
+            if ys.size == 0:
+                continue
+            x0, x1 = int(xs.min()), int(xs.max())
+            y0, y1 = int(ys.min()), int(ys.max())
+            objects.append({
+                "cls": int(cls),
+                "bbox": [x0, y0, x1 - x0 + 1, y1 - y0 + 1],
+                "area_px": int(ys.size),
+                "confidence": float(round(conf[ys, xs].mean() / 255.0, 3)),
+            })
+    return objects
+
+
 def _blob(mask: np.ndarray, rng, cls: int, n: int, rmin: int, rmax: int) -> list[dict]:
     """Нарисовать n круглых "включений" класса cls и вернуть их как объекты."""
     h, w = mask.shape
@@ -225,39 +298,61 @@ def generate(
             "Неравномерное освещение кадра — уверенность модели снижена к краям панорамы."
         )
 
-    # --- Сохраняем маску PNG (значение пикселя = код класса) ---------------
-    stem = Path(image_path).stem
-    mask_path = out_dir / f"{stem}__mask.png"
-    Image.fromarray(mask, mode="L").save(mask_path)
-
     # --- Карта уверенности (grayscale): ярче = увереннее --------------------
     conf = _build_confidence_map(h, w, mask, rng, illumination)
-    conf_path = out_dir / f"{stem}__confidence.png"
-    Image.fromarray(conf, mode="L").save(conf_path)
 
-    # --- Присвоим id объектам и приведём к контракту -----------------------
+    # --- Квантизация в сетку патчей (это и есть вывод patch-clf модели) -----
+    # Пиксельная сцена выше сворачивается в сетку патчей (преобладающий класс +
+    # средняя уверенность на ячейку), а полноразмерная маска/уверенность —
+    # nearest-апскейл этой сетки. Так mock отдаёт БЛОЧНУЮ маску, неотличимую по
+    # формату для metrics/classification, плюс сырой patch_grid (contract v2).
+    tile = _grid_tile(h, w, params)
+    grid_labels, grid_conf, rows, cols = _quantize_to_grid(mask, conf, tile)
+    block_mask = _upsample_nearest(grid_labels, w, h)
+    block_conf = _upsample_nearest(grid_conf, w, h)
+
+    stem = Path(image_path).stem
+    mask_path = out_dir / f"{stem}__mask.png"
+    conf_path = out_dir / f"{stem}__confidence.png"
+    grid_labels_path = out_dir / f"{stem}__grid_labels.png"
+    grid_conf_path = out_dir / f"{stem}__grid_conf.png"
+    Image.fromarray(block_mask, mode="L").save(mask_path)
+    Image.fromarray(block_conf, mode="L").save(conf_path)
+    Image.fromarray(grid_labels, mode="L").save(grid_labels_path)
+    Image.fromarray(grid_conf, mode="L").save(grid_conf_path)
+
+    # --- objects[] пересобираем из БЛОЧНОЙ маски (компоненты одноклассовых -----
+    # патчей), чтобы bbox/площади совпадали с тем, что реально в маске.
     objects = []
-    for i, o in enumerate(objects_raw):
-        objects.append(
-            {
-                "id": i,
-                "class": o["cls"],
-                "bbox": o["bbox"],
-                "area_px": o["area_px"],
-                "confidence": o["confidence"],
-            }
-        )
+    for i, o in enumerate(_objects_from_block_mask(block_mask, block_conf)):
+        objects.append({
+            "id": i,
+            "class": o["cls"],
+            "bbox": o["bbox"],
+            "area_px": o["area_px"],
+            "confidence": o["confidence"],
+        })
 
     inference_ms = int((time.time() - t0) * 1000)
 
     return {
-        "model_version": "mock-0.1.0",
+        "model_version": "mock-patchclf-0.2.0",
         "inference_time_ms": inference_ms,
-        "inference_params": {"scenario": scenario, **params},
+        "inference_params": {
+            "scenario": scenario, "tile": tile, "stride": tile,
+            "grid": [rows, cols], **params,
+        },
         "image_size": {"width": w, "height": h},
         "mask": str(mask_path),
         "class_legend": {int(k): v for k, v in config.CLASS_NAMES.items()},
         "confidence_map": str(conf_path),
+        "patch_grid": {
+            "tile": tile, "stride": tile,
+            "rows": rows, "cols": cols,
+            "origin": [0, 0],
+            "labels": str(grid_labels_path),
+            "conf": str(grid_conf_path),
+        },
         "objects": objects,
         "warnings": warnings,
     }

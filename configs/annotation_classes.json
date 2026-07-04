@@ -1,9 +1,9 @@
 {
   "classes": [
-    {"id": 0, "name": "unlabeled", "name_ru": "Неразмеченная область", "color": [0, 0, 0, 0]},
-    {"id": 1, "name": "talc", "name_ru": "Тальк", "color": [30, 90, 230, 190]},
-    {"id": 2, "name": "ordinary_intergrowth", "name_ru": "Обычные срастания", "color": [0, 200, 0, 190]},
-    {"id": 3, "name": "fine_intergrowth", "name_ru": "Тонкие срастания", "color": [220, 30, 30, 190]},
+    {"id": 0, "name": "unlabeled", "name_ru": "Неразмеченная область / фон", "color": [0, 0, 0, 0]},
+    {"id": 1, "name": "ordinary_intergrowth", "name_ru": "Обычные срастания", "color": [0, 200, 0, 190]},
+    {"id": 2, "name": "fine_intergrowth", "name_ru": "Тонкие срастания", "color": [220, 30, 30, 190]},
+    {"id": 3, "name": "talc", "name_ru": "Тальк", "color": [30, 90, 230, 190]},
     {"id": 4, "name": "uncertain", "name_ru": "Неопределённая область / требует проверки", "color": [255, 165, 0, 190]}
   ]
 }

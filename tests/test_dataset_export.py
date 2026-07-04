@@ -104,6 +104,55 @@ def test_export_s2_bundle_with_split_subfolder(tmp_path):
     assert not (tmp_path / "masks_human").exists()
 
 
+def test_write_imagefolder_layout_and_manifest(tmp_path):
+    import csv
+    recs = [
+        {"image": Image.new("RGB", (48, 48), (10, 20, 30)), "label_name": "talc",
+         "stem": "img_r_3_000", "label": 3, "weight": 1.0, "source_image": "img",
+         "region": "r", "x": 5, "y": 7, "inside": 0.9, "upsampled": 0, "source_size": 48},
+        {"image": Image.new("RGB", (48, 48), (0, 0, 0)), "label_name": "fine_intergrowth",
+         "stem": "img_r_2_000", "label": 2, "weight": 0.5, "source_image": "img",
+         "region": "r", "x": 1, "y": 1, "inside": 0.7, "upsampled": 1, "source_size": 20},
+    ]
+    classes_json = {"2": {"name": "fine_intergrowth"}, "3": {"name": "talc"}}
+    res = de.write_imagefolder(tmp_path, recs, classes_json)
+
+    assert res["num_patches"] == 2
+    assert (tmp_path / "imgs" / "talc" / "img_r_3_000.jpg").exists()
+    assert (tmp_path / "imgs" / "fine_intergrowth" / "img_r_2_000.jpg").exists()
+    assert (tmp_path / "classes.json").exists()
+
+    with open(tmp_path / "manifest.csv", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    assert {r["path"] for r in rows} == {
+        "imgs/talc/img_r_3_000.jpg", "imgs/fine_intergrowth/img_r_2_000.jpg",
+    }
+    assert set(rows[0].keys()) == set(de.PATCH_MANIFEST_FIELDS)
+
+
+def test_quantizer_to_imagefolder_pipeline(tmp_path):
+    """Область эксперта → патчи (quantizer) → ImageFolder (write_imagefolder)."""
+    from src import quantizer as qz
+    from src import config
+
+    rng = np.random.default_rng(0)
+    img = Image.fromarray(rng.integers(0, 255, (200, 200, 3), dtype=np.uint8), "RGB")
+    M = np.zeros((200, 200), dtype=bool)
+    M[30:170, 30:170] = True
+    patches, reason = qz.quantize_region(M, img, config.CLASS_TALC, S=48, seed=1)
+    assert reason == "ok" and patches
+
+    recs = [{
+        "image": p.image, "label_name": "talc", "stem": f"s_{k:03d}",
+        "label": p.label, "weight": p.weight, "source_image": "img", "region": "r",
+        "x": p.x, "y": p.y, "inside": p.inside, "upsampled": int(p.upsampled),
+        "source_size": p.source_size,
+    } for k, p in enumerate(patches)]
+    res = de.write_imagefolder(tmp_path, recs, {"3": {"name": "talc"}})
+    assert res["num_patches"] == len(patches)
+    assert len(list((tmp_path / "imgs" / "talc").glob("*.jpg"))) == len(patches)
+
+
 def test_zip_directory_produces_valid_zip(tmp_path):
     mask = _sample_mask()
     image = Image.new("RGB", (40, 30), (10, 10, 10))

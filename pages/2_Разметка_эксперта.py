@@ -341,16 +341,31 @@ else:
         "изображение+маска, manifest.csv/.jsonl и classes.json (или дополнительно "
         "masks_colored/masks_human в формате S2_v2)."
     )
+_format_labels = {
+    "classic": "Классический (images/masks/manifest)",
+    "s2_v2": "Как S2_v2 (imgs/masks/masks_colored)",
+    "patch": "Патчи для patch-модели (ImageFolder + weights)",
+}
 export_format = st.radio(
-    "Формат", options=["classic", "s2_v2"],
-    format_func=lambda f: "Классический (images/masks/manifest)" if f == "classic" else "Как S2_v2 (imgs/masks/masks_colored)",
+    "Формат", options=["classic", "s2_v2", "patch"],
+    format_func=lambda f: _format_labels[f],
     horizontal=True, disabled=ready_count == 0,
 )
+if export_format == "patch":
+    st.caption(
+        "Каждая размеченная область квантуется в перекрывающиеся квадратные "
+        "патчи train-разрешения (по одному классу на область; «неопределённые» "
+        "и фон в трейн не идут). Раскладка imgs/<класс>/*.jpg + manifest.csv "
+        "с весами — прямо под обучение patch-классификатора."
+    )
 
 if st.button("📥 Скачать датасет для дообучения", disabled=ready_count == 0):
     if export_format == "classic":
         result = ds.export_active_learning(dataset_id)
         count = result["num_samples"]
+    elif export_format == "patch":
+        result = ds.export_active_learning_patch(dataset_id)
+        count = result["num_patches"]
     else:
         result = ds.export_active_learning_s2_style(dataset_id)
         count = result["num_items"]
@@ -371,8 +386,10 @@ if ready:
 
 exports = ds.list_exports(dataset_id)
 exports_s2 = ds.list_exports_s2_style(dataset_id)
-if exports or exports_s2:
+exports_patch = ds.list_exports_patch(dataset_id)
+if exports or exports_s2 or exports_patch:
     st.caption(
         "Ранее выполненные экспорты этого датасета — классический: "
-        f"{', '.join(exports) or '—'}; в формате S2_v2: {', '.join(exports_s2) or '—'}."
+        f"{', '.join(exports) or '—'}; в формате S2_v2: {', '.join(exports_s2) or '—'}; "
+        f"патчи: {', '.join(exports_patch) or '—'}."
     )
