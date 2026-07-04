@@ -500,9 +500,10 @@ if existing_corrections:
 st.divider()
 st.markdown("### 🔁 Дообучить модель на исправлениях и показать результат")
 st.caption(
-    "Модель дообучается на сохранённых исправлениях этого снимка (быстро — учится "
-    "только «голова» классификатора, энкодер заморожен), затем снимок сразу "
-    "переанализируется дообученной моделью. Слева «до», справа «стало». "
+    "Модель дообучается на сохранённых исправлениях этого снимка (быстро — учатся "
+    "только «головы» классификатора сорта И детектора фона, энкодер заморожен), "
+    "затем снимок сразу переанализируется. Правки «фон → руда» дообучают голову "
+    "фона и снимают тайлы из-под маски фона. Слева «до», справа «стало». "
     "Дообучение накопительное: каждый запуск стартует с предыдущей версии."
 )
 
@@ -530,15 +531,24 @@ else:
                 anchor_items = al.build_anchor_items(
                     base, mask_for_export, trainable_corr, n=n_anchors,
                 ) if n_anchors else []
+                # Голова ФОНА: правки «фон → руда» учат bg_head, что тайл не фон,
+                # и снимают его из-под маски фона (иначе фон переопределяет сорт).
+                bg_items = al.build_bg_items(str(image_path), existing_corrections)
+                bg_anchor_items = al.build_bg_anchor_items(
+                    base, mask_for_export, existing_corrections, n=n_anchors,
+                ) if n_anchors else []
                 version = st.session_state.get("al_version", 0) + 1
-                prev_ckpt = st.session_state.get("al_ckpt")  # накопительно
-                ckpt, report = al.retrain_and_save(
+                prev_ckpt = st.session_state.get("al_ckpt")        # накопительно
+                prev_bg = st.session_state.get("al_bg_ckpt")       # накопительно
+                ckpt, bg_ckpt, report = al.retrain_and_save(
                     str(image_path), corr_items + anchor_items,
                     version=version, from_ckpt=prev_ckpt,
+                    bg_items=bg_items + bg_anchor_items, from_bg_ckpt=prev_bg,
                 )
-                new_result = al.reanalyze(str(image_path), ckpt)
+                new_result = al.reanalyze(str(image_path), ckpt, bg_ckpt)
             st.session_state["al_version"] = version
             st.session_state["al_ckpt"] = ckpt
+            st.session_state["al_bg_ckpt"] = bg_ckpt
             st.session_state["al_after"] = {"result": new_result, "report": report}
             # Перерисовываем ВСЮ страницу дообученной моделью: первая фотка,
             # класс руды и проценты вверху пересчитаются (al_active → result).
@@ -548,9 +558,15 @@ else:
 
 if al_active:
     _rep = _al_after["report"]
+    _bg = _rep.get("bg")
+    _bg_msg = (
+        f" Голова фона: {_bg['num_patches']} патчей, train-acc {_bg['train_acc']} "
+        f"(фон {_bg['label_counts']['фон']} / руда {_bg['label_counts']['руда']})."
+        if _bg else ""
+    )
     st.success(
         f"Дообучено (v{st.session_state.get('al_version')}) на {_rep['num_patches']} "
-        f"патчах ({_rep['num_feature_vectors']} примеров), train-acc {_rep['train_acc']}. "
+        f"патчах ({_rep['num_feature_vectors']} примеров), train-acc {_rep['train_acc']}.{_bg_msg} "
         "Первая фотка вверху страницы, класс руды и все проценты уже пересчитаны."
     )
     _bcol, _acol = st.columns(2)
