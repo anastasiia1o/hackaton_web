@@ -12,6 +12,7 @@ learning). Второй этап (морфология срастаний) и т
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -23,11 +24,11 @@ from src import annotation_config as ac
 from src import config, dataset_export as de, dataset_storage as ds, event_log as ev
 from ui import file_pickers, viewer
 
-st.set_page_config(page_title="OreVision — Активное обучение", page_icon="🖌️", layout="wide")
+st.set_page_config(page_title="OreVision — Разметка эксперта", page_icon="🖌️", layout="wide")
 config.ensure_dirs()
 Image.MAX_IMAGE_PIXELS = None
 
-st.title("🖌️ Активное обучение")
+st.title("🖌️ Разметка эксперта")
 st.caption(
     "Обведите мышью произвольную область на шлифе (замкнутая линия, не "
     "обязательно прямоугольник; правая кнопка мыши — отменить выделение), "
@@ -392,6 +393,8 @@ if st.button("📥 Скачать датасет для дообучения", d
         "zip_bytes": de.zip_directory(result["dir"]),
         "export_id": result["export_id"],
         "count": count,
+        "format": export_format,
+        "dir": result["dir"],
     }
 
 ready = st.session_state.get("al_export_ready")
@@ -401,6 +404,21 @@ if ready:
         "⬇️ Скачать (ZIP)", data=ready["zip_bytes"],
         file_name=f"{ready['export_id']}.zip", mime="application/zip",
     )
+    # Для patch-экспорта показываем готовую команду дообучения вшитой модели
+    # (модуль ml_service/train.py ест именно этот ImageFolder-экспорт).
+    if ready.get("format") == "patch":
+        rel_dir = os.path.relpath(ready["dir"], config.BASE_DIR)
+        st.markdown(
+            "**Дообучить модель на этих патчах** — модуль `ml_service/train.py` "
+            "берёт этот экспорт и выдаёт новый чекпоинт (грузится сервисом через "
+            "`ORE_ML_CKPT`):"
+        )
+        st.code(
+            f"python -m ml_service.train \\\n"
+            f"    --patch-export {rel_dir} \\\n"
+            f"    --save-ckpt ml_service/grade_al_finetuned.pth",
+            language="bash",
+        )
 
 exports = ds.list_exports(dataset_id)
 exports_s2 = ds.list_exports_s2_style(dataset_id)

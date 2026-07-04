@@ -15,6 +15,7 @@ OreVision — локальный веб-интерфейс (Streamlit).
 
 from __future__ import annotations
 
+import io
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
@@ -23,6 +24,7 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
+from src import active_learning as al
 from src import config, dataset_export, ml_client, reports, storage, gis_export
 from src.contract import ContractError
 from src.pipeline import run_analysis, load_mask
@@ -114,6 +116,13 @@ image_path = _resolve_input()
 if image_path is None:
     st.info("Загрузите изображение шлифа/панораму для анализа встроенной моделью.")
     st.stop()
+
+# Сменили изображение → сбрасываем состояние активного обучения предыдущего
+# снимка (иначе «стало»/дообученный чекпоинт показались бы для чужой картинки).
+if st.session_state.get("al_image_stem") != image_path.stem:
+    for _k in ("al_after", "al_ckpt", "al_version", "corr_s2_zip"):
+        st.session_state.pop(_k, None)
+    st.session_state["al_image_stem"] = image_path.stem
 
 # Размер оригинала нужен дальше (координаты исправлений считаем в его пикселях).
 # Ограничения на размер фотографии НЕТ — гигапиксельные панорамы поддерживаются
@@ -383,3 +392,85 @@ if existing_corrections:
             data=_corr_zip, file_name=f"{image_path.stem}_corrections_s2v2.zip",
             mime="application/zip",
         )
+
+# --- Дообучение на исправлениях и показ результата на этой же картинке --------
+# Это и есть активное обучение в узком смысле: правка эксперта → модель
+# дообучается (быстро, только «голова») → снимок сразу переанализируется
+# дообученной моделью, показываем «до/стало».
+st.divider()
+st.markdown("### 🔁 Дообучить модель на исправлениях и показать результат")
+st.caption(
+    "Модель дообучается на сохранённых исправлениях этого снимка (быстро — учится "
+    "только «голова» классификатора, энкодер заморожен), затем снимок сразу "
+    "переанализируется дообученной моделью. Слева «до», справа «стало». "
+    "Дообучение накопительное: каждый запуск стартует с предыдущей версии."
+)
+
+_TRAINABLE_CORR = {config.CLASS_ORDINARY, config.CLASS_FINE, config.CLASS_TALC}
+trainable_corr = [
+    c for c in existing_corrections
+    if c.get("region_fraction") and int(c.get("correct_class", 0)) in _TRAINABLE_CORR
+]
+if not trainable_corr:
+    st.info(
+        "Сохраните хотя бы одно исправление с классом руды (обычные / тонкие / "
+        "тальк, не «артефакт») — тогда появится кнопка дообучения."
+    )
+else:
+    n_anchors = st.slider(
+        "Якорных тайлов (стабилизируют дообучение, размечены текущим предсказанием)",
+        0, 24, 8, help="Случайные тайлы снимка с текущим предсказанием модели и "
+                       "малым весом — не дают дообучению «схлопнуть» все классы в исправленный.",
+    )
+    if st.button(f"🔁 Дообучить на {len(trainable_corr)} исправл. и показать «стало»",
+                 type="primary"):
+        try:
+            with st.spinner("Дообучаем модель на исправлениях и переанализируем снимок…"):
+                corr_items = al.build_correction_items(str(image_path), trainable_corr)
+                anchor_items = al.build_anchor_items(
+                    base, mask_for_export, trainable_corr, n=n_anchors,
+                ) if n_anchors else []
+                version = st.session_state.get("al_version", 0) + 1
+                prev_ckpt = st.session_state.get("al_ckpt")  # накопительно
+                ckpt, report = al.retrain_and_save(
+                    str(image_path), corr_items + anchor_items,
+                    version=version, from_ckpt=prev_ckpt,
+                )
+                new_result = al.reanalyze(str(image_path), ckpt)
+                new_mask = load_mask(new_result.ml.mask_path)
+                new_overlay = viewer.make_overlay(
+                    base, new_mask, show_classes=show_classes, opacity=opacity,
+                )
+                _buf = io.BytesIO()
+                new_overlay.convert("RGB").save(_buf, format="PNG")
+            st.session_state["al_version"] = version
+            st.session_state["al_ckpt"] = ckpt
+            st.session_state["al_after"] = {
+                "overlay_png": _buf.getvalue(),
+                "result": new_result,
+                "report": report,
+            }
+            st.success(
+                f"Готово (версия v{version}): дообучено на {report['num_patches']} "
+                f"патчах ({report['num_feature_vectors']} примеров), "
+                f"train-acc {report['train_acc']}."
+            )
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Не удалось дообучить/переанализировать: {e}")
+
+_after = st.session_state.get("al_after")
+if _after:
+    _bcol, _acol = st.columns(2)
+    with _bcol:
+        st.markdown("**До — базовая модель**")
+        st.image(overlay, use_container_width=True)
+    with _acol:
+        st.markdown(f"**Стало — дообучено (v{st.session_state.get('al_version')})**")
+        st.image(_after["overlay_png"], use_container_width=True)
+    st.markdown("**Классификация и метрики после дообучения:**")
+    components.classification_card(_after["result"])
+    components.metrics_table(_after["result"])
+    if st.button("↩️ Сбросить дообучение (вернуться к базовой модели)"):
+        for _k in ("al_after", "al_ckpt", "al_version"):
+            st.session_state.pop(_k, None)
+        st.rerun()
