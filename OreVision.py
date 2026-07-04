@@ -147,7 +147,7 @@ if image_path is None:
 # Сменили изображение → сбрасываем состояние активного обучения предыдущего
 # снимка (иначе «стало»/дообученный чекпоинт показались бы для чужой картинки).
 if st.session_state.get("al_image_stem") != image_path.stem:
-    for _k in ("al_after", "al_ckpt", "al_version", "corr_s2_zip"):
+    for _k in ("al_after", "al_ckpt", "al_bg_ckpt", "al_version", "corr_s2_zip"):
         st.session_state.pop(_k, None)
     st.session_state["al_image_stem"] = image_path.stem
 
@@ -399,7 +399,7 @@ st.caption(
 
 corr_class = st.selectbox(
     "Верный класс участка (для сохранения исправления)",
-    options=[config.CLASS_ORDINARY, config.CLASS_FINE,
+    options=[config.CLASS_BACKGROUND, config.CLASS_ORDINARY, config.CLASS_FINE,
              config.CLASS_TALC, config.CLASS_ARTIFACT],
     format_func=lambda c: config.CLASS_NAMES[c],
 )
@@ -460,6 +460,38 @@ if existing_corrections:
         use_container_width=True, hide_index=True,
     )
 
+    # --- Стереть неверные/лишние исправления -------------------------------
+    # Стирание сбрасывает и накопленное активное обучение этого снимка: иначе
+    # эффект уже удалённого исправления остался бы «запечён» в чекпоинтах
+    # al_ckpt/al_bg_ckpt, и стирание выглядело бы так, будто ничего не изменилось.
+    _RESET_AL_KEYS = ("al_after", "al_ckpt", "al_bg_ckpt", "al_version", "corr_s2_zip")
+    _del_col1, _del_col2, _del_col3 = st.columns([3, 1, 1])
+    with _del_col1:
+        _del_labels = {
+            f"{i + 1}. {c.get('correct_class_name', c.get('correct_class'))} "
+            f"— {c.get('created_at', '')} ({c.get('author') or '—'})": c["_id"]
+            for i, c in enumerate(existing_corrections)
+        }
+        _del_choice = st.selectbox(
+            "Стереть одно исправление", options=list(_del_labels.keys()), key="del_corr_choice",
+        )
+    with _del_col2:
+        st.write("")
+        if st.button("🗑️ Стереть", key="del_corr_one"):
+            storage.delete_correction(str(image_path), _del_labels[_del_choice])
+            for _k in _RESET_AL_KEYS:
+                st.session_state.pop(_k, None)
+            st.success("Исправление стёрто. Активное обучение снимка сброшено к базовой модели.")
+            st.rerun()
+    with _del_col3:
+        st.write("")
+        if st.button("🗑️ Стереть все", key="del_corr_all"):
+            n_deleted = storage.delete_all_corrections(str(image_path))
+            for _k in _RESET_AL_KEYS:
+                st.session_state.pop(_k, None)
+            st.success(f"Стёрто исправлений: {n_deleted}. Активное обучение снимка сброшено к базовой модели.")
+            st.rerun()
+
     if st.button("📦 Собрать экспорт исправлений (ZIP, формат S2_v2)"):
         corr_items = []
         for i, c in enumerate(existing_corrections):
@@ -512,10 +544,18 @@ trainable_corr = [
     c for c in existing_corrections
     if c.get("region_fraction") and int(c.get("correct_class", 0)) in _TRAINABLE_CORR
 ]
-if not trainable_corr:
+# Исправления «это фон» тоже учат (голову фона), даже если ни одной правки
+# по сорту руды нет — иначе явно отметить тайл фоном можно, а дообучить на
+# этом отдельно от правки сорта нельзя.
+bg_trainable_corr = [
+    c for c in existing_corrections
+    if c.get("region_fraction") and int(c.get("correct_class", 0)) == config.CLASS_BACKGROUND
+]
+if not trainable_corr and not bg_trainable_corr:
     st.info(
         "Сохраните хотя бы одно исправление с классом руды (обычные / тонкие / "
-        "тальк, не «артефакт») — тогда появится кнопка дообучения."
+        "тальк, не «артефакт») или явно отметьте участок как «Фон / нерудная "
+        "матрица» — тогда появится кнопка дообучения."
     )
 else:
     n_anchors = st.slider(
@@ -523,8 +563,11 @@ else:
         0, 24, 8, help="Случайные тайлы снимка с текущим предсказанием модели и "
                        "малым весом — не дают дообучению «схлопнуть» все классы в исправленный.",
     )
-    if st.button(f"🔁 Дообучить на {len(trainable_corr)} исправл. и показать «стало»",
-                 type="primary"):
+    if st.button(
+        f"🔁 Дообучить на {len(trainable_corr)} испр. сорта + "
+        f"{len(bg_trainable_corr)} испр. фона и показать «стало»",
+        type="primary",
+    ):
         try:
             with st.spinner("Дообучаем модель на исправлениях и переанализируем снимок…"):
                 corr_items = al.build_correction_items(str(image_path), trainable_corr)
@@ -598,6 +641,6 @@ if al_active:
                 )
 
     if st.button("↩️ Сбросить дообучение (вернуться к базовой модели)"):
-        for _k in ("al_after", "al_ckpt", "al_version"):
+        for _k in ("al_after", "al_ckpt", "al_bg_ckpt", "al_version"):
             st.session_state.pop(_k, None)
         st.rerun()
