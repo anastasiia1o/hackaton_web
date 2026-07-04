@@ -37,6 +37,39 @@ class MLObject:
 
 
 @dataclass
+class PatchGrid:
+    """
+    Сырой квантованный вывод patch-classification модели (см. API_CONTRACT.md v2
+    и docs/PATCH_AL_REDESIGN.md).
+
+    Модель классифицирует не пиксели, а квадратные ПАТЧИ train-разрешения.
+    `labels`/`conf` — небольшие PNG размером rows×cols (пиксель = код класса /
+    яркость = уверенность). Полноразмерная `mask` в MLResponse — это ровно этот
+    же grid, растянутый nearest'ом до image_size, поэтому «нижняя» половина сайта
+    (metrics/classification) читает блок-маску как обычную пиксельную.
+    """
+    tile: int                    # сторона окна патча в пикселях исходника
+    stride: int                  # шаг сетки в пикселях исходника
+    rows: int
+    cols: int
+    origin: list[int]            # [x, y] левого-верхнего угла первого патча
+    labels_path: str             # PNG rows×cols, пиксель = код класса (0..4)
+    conf_path: Optional[str]     # PNG rows×cols, яркость = уверенность (0..255)
+
+    @staticmethod
+    def from_json(d: dict[str, Any]) -> "PatchGrid":
+        return PatchGrid(
+            tile=int(d["tile"]),
+            stride=int(d.get("stride", d["tile"])),
+            rows=int(d["rows"]),
+            cols=int(d["cols"]),
+            origin=list(d.get("origin", [0, 0])),
+            labels_path=d["labels"],
+            conf_path=d.get("conf"),
+        )
+
+
+@dataclass
 class MLResponse:
     """
     Полный ответ ML-сервиса на POST /analyze.
@@ -51,6 +84,7 @@ class MLResponse:
     confidence_map_path: Optional[str]   # путь к grayscale-PNG уверенности
     objects: list[MLObject] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    patch_grid: Optional[PatchGrid] = None   # сырой patch-grid (contract v2), опц.
 
     @staticmethod
     def from_json(d: dict[str, Any]) -> "MLResponse":
@@ -65,6 +99,7 @@ class MLResponse:
             )
             for o in d.get("objects", [])
         ]
+        pg = d.get("patch_grid")
         return MLResponse(
             model_version=d["model_version"],
             inference_time_ms=d["inference_time_ms"],
@@ -75,6 +110,7 @@ class MLResponse:
             confidence_map_path=d.get("confidence_map"),
             objects=objects,
             warnings=d.get("warnings", []),
+            patch_grid=PatchGrid.from_json(pg) if pg else None,
         )
 
 

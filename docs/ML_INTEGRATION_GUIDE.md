@@ -69,8 +69,16 @@
   "inference_params": { "tile": 1024 },   // с какими параметрами (эхо params)
   "image_size": { "width": 10000, "height": 8000 },  // размер В ПИКСЕЛЯХ
 
-  "mask": "/abs/path/pred_mask.png",      // путь к PNG-маске (пиксель = код)
+  "mask": "/abs/path/pred_mask.png",      // БЛОЧНАЯ PNG-маска (v2): пиксель = код
+                                          //   класса; = patch_grid.labels, апскейл nearest
   "confidence_map": "/abs/path/conf.png", // grayscale-PNG, ярче = увереннее (0..255)
+
+  "patch_grid": {                          // v2: сырой квантованный вывод patch-модели
+    "tile": 2272, "stride": 2272,          //   окно/шаг патча в пикселях исходника
+    "rows": 6, "cols": 9, "origin": [0, 0],
+    "labels": "/abs/path/grid_labels.png", //   PNG rows×cols, пиксель = код класса
+    "conf":   "/abs/path/grid_conf.png"    //   PNG rows×cols, яркость = уверенность
+  },
 
   "class_legend": {                        // расшифровка кодов (ровно как в §3)
     "0": "фон / нерудная матрица",
@@ -102,6 +110,12 @@
   отвергнет ответ (валидатор это проверяет — см. §6).
 - `mask` и `confidence_map` — это **пути к файлам**, а не массивы чисел в JSON.
   Так мы не раздуваем JSON гигапиксельными данными. Про пути — см. §5.
+- `patch_grid` (v2, patch-classification) — сырой квантованный вывод: сетка
+  патчей `rows×cols`. `mask`/`confidence_map` — это ровно `labels`/`conf`,
+  растянутые nearest'ом до `image_size` (поэтому `mask` теперь БЛОЧНАЯ). Поле
+  опционально: без него ответ валиден (только предупреждение), но для patch-
+  модели отдавайте его. Валидатор сверяет `size(labels)==rows×cols` и
+  `mask==nearest-upsample(labels)`. См. `docs/PATCH_AL_REDESIGN.md`.
 - `objects` может быть пустым списком `[]`, если ничего не найдено. Не `null`.
 - `confidence` в объектах и яркость в `confidence_map` — ваша оценка уверенности.
   Сайт использует их, чтобы честно уводить спорные случаи в «экспертную проверку».
@@ -159,6 +173,8 @@ print(errors)   # пустой список = всё по контракту
 - [ ] `POST /analyze` принимает `multipart/form-data` с полем `image`.
 - [ ] Возвращает JSON со всеми полями из §4.
 - [ ] Маска — 8-битный PNG со значениями пикселей 0..4.
+- [ ] (v2) `patch_grid.labels` — PNG rows×cols, коды 0..4; `mask` = его
+      nearest-апскейл до `image_size`.
 - [ ] `image_size` совпадает с размером маски.
 - [ ] `objects` — список (можно пустой), у каждого корректные поля.
 - [ ] `confidence` и `confidence_map` заполнены осмысленно.
@@ -172,5 +188,7 @@ print(errors)   # пустой список = всё по контракту
 
 ## 8. Версия контракта
 
-Текущая версия: **v1**. Любое изменение согласуется через
+Текущая версия: **v2** (patch-classification: блочная `mask` + `patch_grid`).
+Обратная совместимость с v1 сохранена — пиксельный ML без `patch_grid` остаётся
+валидным (только предупреждение). Любое изменение согласуется через
 `orevision-app/docs/coordination/HANDOFF.md` и правку `API_CONTRACT.md`.

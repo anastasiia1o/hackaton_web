@@ -26,7 +26,7 @@ SAMPLES_DIR = DATA_DIR / "samples"     # демонстрационные обр
 
 # --- Версии (для воспроизводимости и логов) --------------------------------
 APP_VERSION = "0.2.0"          # версия сайта OreVision
-CONTRACT_VERSION = "v1"        # версия API-контракта с ML
+CONTRACT_VERSION = "v2"        # v2: блочная маска + patch_grid (patch-classification)
 
 # --- Настройки ML-сервиса ---------------------------------------------------
 # По умолчанию работаем в MOCK-режиме, чтобы сайт можно было запустить
@@ -86,6 +86,32 @@ SUPPORTED_FORMATS = (".tif", ".tiff", ".png", ".jpg", ".jpeg")
 # тайлами (src/metrics.py: compute_metrics_from_mask_path), чтобы не грузить
 # всю маску в RAM разом. Размер тайла в пикселях (квадрат).
 METRICS_TILE_SIZE = 2048
+
+# --- Patch-classification (patch-AL) ----------------------------------------
+# Модель классифицирует не пиксели, а КВАДРАТНЫЕ ПАТЧИ train-разрешения.
+# ML отдаёт блочную маску (сетка патч-классов, растянутая nearest'ом до полного
+# разрешения) + сырую сетку patch_grid. См. docs/PATCH_AL_REDESIGN.md и
+# API_CONTRACT.md (v2). Эти значения — единый источник для модели, разметки,
+# квантизации области эксперта в патчи (src/quantizer.py) и active-learning
+# отбора (src/active_query.py).
+PATCH_SIZE = int(os.getenv("OREVISION_PATCH_SIZE", "2272"))   # одно train-FOV, px
+# Порог покрытия: патч берём в трейн, только если ≥ PATCH_TAU его площади лежит
+# внутри выделенной экспертом области (иначе патч «загрязнён» соседним классом).
+PATCH_TAU_COVERAGE = float(os.getenv("OREVISION_PATCH_TAU", "0.65"))
+# Перекрытие соседних патчей при нарезке области (>0 — намеренно, дешёвая
+# пространственная аугментация: одна область даёт больше обучающих примеров).
+PATCH_OVERLAP = float(os.getenv("OREVISION_PATCH_OVERLAP", "0.5"))
+# Кап на число патчей из одной области (farthest-point), чтобы крупная область
+# не забила датасет near-duplicate'ами.
+PATCH_CAP_N = int(os.getenv("OREVISION_PATCH_CAP", "128"))
+# Порог уверенности: патчи ниже него модель считает неуверенными (код 4),
+# а active learning поднимает их наверх worklist'а и переводит регион в
+# статус needs_expert_review.
+PATCH_CONF_THRESHOLD = float(os.getenv("OREVISION_PATCH_CONF", "0.55"))
+# Разрешение сетки патчей у mock-генератора: сколько ячеек по короткой стороне
+# кадра (реальная модель берёт tile=PATCH_SIZE, но демо-картинки маленькие,
+# поэтому для наглядной блочной маски сетку задаём в ячейках).
+MOCK_PATCH_GRID_CELLS = int(os.getenv("OREVISION_MOCK_GRID", "24"))
 
 
 def ensure_dirs() -> None:

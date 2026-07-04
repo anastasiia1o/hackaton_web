@@ -33,7 +33,15 @@ _REQUIRED_TOP: dict[str, type | tuple[type, ...]] = {
     "objects": list,
 }
 # Поля, которые желательны, но не блокируют работу (только предупреждение).
-_RECOMMENDED_TOP = ("confidence_map", "inference_params", "warnings")
+# patch_grid — сырой квантованный вывод patch-classification модели (contract
+# v2). Для обратной совместимости его отсутствие — только предупреждение
+# (старый пиксельный ML без patch_grid остаётся валидным).
+_RECOMMENDED_TOP = ("confidence_map", "inference_params", "warnings", "patch_grid")
+
+# Максимальное число ячеек сетки, при котором ещё проверяем согласованность
+# mask == nearest-upsample(labels) целиком (для гигапиксельных панорам этот
+# полный разбор пропускаем, чтобы валидатор не грузил всё в RAM).
+_PATCH_CONSISTENCY_CELL_CAP = 20000
 
 # Допустимые коды классов (см. API_CONTRACT.md).
 _VALID_CLASSES = {
@@ -118,6 +126,12 @@ def validate_ml_response(
     if check_mask_file and isinstance(raw.get("mask"), str):
         errors.extend(_validate_mask_file(raw["mask"], w, h))
 
+    # 6. patch_grid (contract v2): согласованность блочной маски с сеткой патчей.
+    if "patch_grid" in raw and raw["patch_grid"] is not None:
+        errors.extend(
+            _validate_patch_grid(raw["patch_grid"], raw.get("mask"), w, h, check_mask_file)
+        )
+
     return errors
 
 
@@ -156,6 +170,91 @@ def _validate_object(i: int, o: Any) -> list[str]:
     conf = o.get("confidence")
     if conf is not None and not (isinstance(conf, (int, float)) and 0.0 <= conf <= 1.0):
         errs.append(f"objects[{i}]: 'confidence'={conf} должно быть в диапазоне [0,1].")
+    return errs
+
+
+def _validate_patch_grid(
+    pg: Any,
+    mask_path: Any,
+    w: int | None,
+    h: int | None,
+    check_files: bool,
+) -> list[str]:
+    """
+    Проверить блок `patch_grid` (contract v2): типы, размер сетки, коды классов,
+    и — если сетка небольшая — согласованность `mask` == nearest-upsample(labels).
+    """
+    errs: list[str] = []
+    if not isinstance(pg, dict):
+        return [f"'patch_grid' должен быть объектом, а получен {type(pg).__name__}."]
+
+    for f in ("tile", "rows", "cols", "labels"):
+        if f not in pg:
+            errs.append(f"patch_grid: отсутствует поле '{f}'.")
+    rows = _as_int(pg.get("rows"))
+    cols = _as_int(pg.get("cols"))
+    tile = _as_int(pg.get("tile"))
+    if rows is None or cols is None or rows <= 0 or cols <= 0:
+        errs.append("patch_grid: 'rows' и 'cols' должны быть положительными целыми.")
+    if tile is None or tile <= 0:
+        errs.append("patch_grid: 'tile' должен быть положительным целым.")
+
+    origin = pg.get("origin", [0, 0])
+    if not (isinstance(origin, (list, tuple)) and len(origin) == 2):
+        errs.append("patch_grid: 'origin' должен быть [x, y].")
+
+    labels_path = pg.get("labels")
+    if not check_files or not isinstance(labels_path, str):
+        return errs
+    if not os.path.exists(labels_path):
+        errs.append(f"patch_grid: файл 'labels' не найден: {labels_path}")
+        return errs
+    try:
+        import numpy as np
+        from PIL import Image
+
+        with Image.open(labels_path) as im:
+            labels = np.array(im.convert("L"))
+    except Exception as e:  # noqa: BLE001
+        return errs + [f"patch_grid: не удалось прочитать 'labels' ({labels_path}): {e}"]
+
+    lh, lw = labels.shape[:2]
+    if rows is not None and cols is not None and (lh != rows or lw != cols):
+        errs.append(
+            f"patch_grid: размер labels ({lw}x{lh}) не совпадает с rows×cols "
+            f"({cols}x{rows})."
+        )
+    import numpy as np
+
+    bad = sorted(v for v in set(np.unique(labels).tolist()) if v not in _VALID_CLASSES)
+    if bad:
+        errs.append(
+            f"patch_grid.labels содержит недопустимые коды классов {bad[:8]} "
+            f"(ожидаются только 0..4)."
+        )
+
+    # Согласованность mask == nearest-upsample(labels) — только для небольших сеток.
+    if (
+        isinstance(mask_path, str)
+        and os.path.exists(mask_path)
+        and rows is not None and cols is not None
+        and rows * cols <= _PATCH_CONSISTENCY_CELL_CAP
+        and w and h
+    ):
+        try:
+            up = np.array(
+                Image.fromarray(labels.astype(np.uint8), mode="L").resize((w, h), Image.NEAREST)
+            )
+            with Image.open(mask_path) as im:
+                mask = np.array(im.convert("L"))
+            if mask.shape == up.shape and not np.array_equal(mask, up):
+                mismatch = float(np.mean(mask != up))
+                errs.append(
+                    "patch_grid: 'mask' не совпадает с nearest-апскейлом 'labels' "
+                    f"(расхождение {mismatch * 100:.1f}% пикселей)."
+                )
+        except Exception:  # noqa: BLE001 — сверка необязательна, не валим на ней
+            pass
     return errs
 
 
