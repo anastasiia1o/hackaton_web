@@ -83,10 +83,38 @@ python ml_service/test_contract_shape.py
 Тест прогоняет ответ сервиса через валидатор сайта (`src/contract.py`) и весь
 пайплайн (`metrics` → `classification`).
 
+## Дообучение (active learning)
+
+`train.py` замыкает цикл активного обучения **внутри этого репозитория** (раньше
+обучение жило только в `../ore_classification`). Он ест ImageFolder-экспорт патчей
+из редактора разметки (`src/dataset_storage.export_active_learning_patch` →
+`imgs/<класс>/*.jpg` + `manifest.csv` с весами) и выдаёт новый чекпоинт **той же
+архитектуры**, который без правок грузит `model.py`.
+
+```bash
+# 1. В UI (страница «Активное обучение») разметить области и экспортировать
+#    формат «Патчи для patch-модели (ImageFolder + weights)».
+# 2. Дообучить вшитую модель на этих патчах:
+python -m ml_service.train \
+    --patch-export data/datasets/<id>/exports/active_learning_patch/<export_id> \
+    --save-ckpt ml_service/grade_al_finetuned.pth
+# 3. Подключить новый чекпоинт (local или real режим):
+ORE_ML_CKPT=ml_service/grade_al_finetuned.pth python ml_service/server.py
+```
+
+Стратегия — как в оригинальном `train_grade_classifier_v2.py` (старт с вшитого
+чекпоинта, разморозка энкодера с `encoder_lr = lr·0.1`, cosine-расписание,
+взвешенная CE по обратной частоте класса) плюс `WeightedRandomSampler` по весам
+патчей. Можно подмешать «эталонный» датасет по сортам через `--base-dataset`
+(ImageFolder: подпапки `talc`/`ordinary`/`fine`). Рядом с чекпоинтом пишется
+`*.report.json` (метрики, состав трейна, история эпох). Коды классов размётки
+(контракт 1/2/3) переводятся в индексы выхода модели (talc→0, ordinary→1, fine→2).
+
 ## Что в этой папке
 - `server.py` — Flask-приложение (`/health`, `/analyze`).
 - `model.py` — загрузка весов + батч-инференс тайлов (ленивый импорт torch).
 - `infer.py` — тайлинг панорамы + сборка JSON по контракту.
+- `train.py` — дообучение вшитой модели на патчах active learning (CLI).
 - `test_contract_shape.py` — проверка контракта без torch.
 - `reference/` — исходные скрипты и `ОПИСАНИЕ_КОДА.txt` от ML-команды (для аудита).
 - `grade_unfreeze_best.pth` — веса (в git не коммитятся).

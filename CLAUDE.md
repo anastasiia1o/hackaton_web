@@ -31,6 +31,11 @@
     блочная маска + `patch_grid` + `objects`). Сопоставление классов модели с
     кодами контракта: **talc→3, ordinary→1, fine→2**.
   - `server.py` — опциональный Flask-сервис (`/health`, `/analyze`) для режима real.
+  - `train.py` — **модуль активного обучения**: дообучает вшитую модель на
+    ImageFolder-экспорте патчей (`export_active_learning_patch`) и выдаёт новый
+    чекпоинт той же архитектуры (грузится через `ORE_ML_CKPT`). Весь цикл
+    обучения теперь внутри репозитория; `reference/` — аудиторские копии
+    оригинальных скриптов из `../ore_classification`.
 - **Режимы ML** (`src/config.py:ML_MODE`, env `OREVISION_ML_MODE`):
   - `local` (по умолчанию) — модель грузится и считает **в процессе сайта**
     (`src/ml_client.py:_analyze_local` → `ml_service.infer`). Один `streamlit run`,
@@ -67,6 +72,11 @@ pytest -q                           # 91 тест
 ```
 Вынести инференс на отдельную (GPU) машину: `python ml_service/server.py` +
 `OREVISION_ML_MODE=real`.
+
+Дообучить модель на правках эксперта (active learning): в UI экспортировать
+патчи (формат «Патчи для patch-модели»), затем
+`python -m ml_service.train --patch-export <экспорт> --save-ckpt ml_service/grade_al_finetuned.pth`
+и подключить новый чекпоинт через `ORE_ML_CKPT`.
 
 ## Правила работы с git
 1. Не коммить прямо в `main` — только через ветку `stream-*/<задача>` и Pull Request.
