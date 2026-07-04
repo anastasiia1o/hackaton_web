@@ -57,10 +57,3 @@ def legend_bar() -> None:
             f'{name}</span>'
         )
     st.markdown(" ".join(chips), unsafe_allow_html=True)
-
-
-def rule_trace(result: AnalysisResult) -> None:
-    """Показать пошаговый след сработавших правил (для аудита геологом)."""
-    with st.expander("Как получен результат (след правил)"):
-        for step in result.classification.rule_trace:
-            st.markdown(f"- {step}")
