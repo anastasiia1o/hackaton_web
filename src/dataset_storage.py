@@ -678,6 +678,113 @@ def export_active_learning_s2_style(
     return result
 
 
+def _effective_patch_size(image: Image.Image) -> int:
+    """
+    Сторона патча в пикселях ДЛЯ ЭТОГО кадра. Реальная модель режет одно
+    train-FOV (config.PATCH_SIZE) из полноразмерной панорамы; у нас на диске
+    хранится уменьшенная для показа копия (roi_image), поэтому патч масштабируем
+    к кадру: ~1/4 короткой стороны, но не больше PATCH_SIZE и не меньше 48 px.
+    Так из одной области получается несколько перекрывающихся патчей, а не один.
+    """
+    short = min(image.width, image.height)
+    return int(max(48, min(config.PATCH_SIZE, short // 4)))
+
+
+def export_active_learning_patch(
+    dataset_id: str,
+    *,
+    statuses: tuple[str, ...] = ac.EXPORTABLE_STATUSES,
+    export_id: Optional[str] = None,
+    patch_size: Optional[int] = None,
+    overlap: float = config.PATCH_OVERLAP,
+    tau: float = config.PATCH_TAU_COVERAGE,
+    cap_n: int = config.PATCH_CAP_N,
+) -> dict:
+    """
+    Экспорт в формате patch-AL (ImageFolder) — см. docs/PATCH_AL_REDESIGN.md §6.
+
+    Для каждого экспортируемого региона берём его semantic_mask (класс на пиксель)
+    и roi_image, и КВАНТУЕМ каждый обучаемый класс (ac.TRAINABLE_CLASS_IDS) в
+    набор перекрывающихся патчей train-разрешения (src/quantizer.py). Патчи
+    раскладываются в imgs/<class_name>/, пишется manifest.csv (с весами и
+    provenance) и classes.json. «Неопределённые» (uncertain=артефакт) и фон в
+    трейн не идут. Квантизация детерминирована (сид от region_id) — экспорт
+    воспроизводим.
+    """
+    from . import dataset_export as de
+    from . import quantizer as qz
+
+    export_id = export_id or _friendly_export_id(dataset_id, "patch")
+    edir = dataset_dir(dataset_id) / "exports" / "active_learning_patch" / export_id
+
+    by_id = {c.id: c for c in ac.load_classes()}
+    classes_json = {
+        str(cid): {"name": by_id[cid].name, "name_ru": by_id[cid].name_ru}
+        for cid in ac.TRAINABLE_CLASS_IDS if cid in by_id
+    }
+
+    records: list[dict] = []
+    summary = {"regions": 0, "skipped_reasons": {}}
+
+    ann_root = annotations_dir(dataset_id)
+    if ann_root.exists():
+        for image_dir in sorted(ann_root.iterdir()):
+            if not image_dir.is_dir():
+                continue
+            image_id = image_dir.name
+            for roi in list_rois(dataset_id, image_id):
+                if roi.get("status", ac.STATUS_DRAFT) not in statuses:
+                    continue
+                region_id = roi["region_id"]
+                mask, _state, _shapes = load_annotation(dataset_id, image_id, region_id)
+                roi_image = load_roi_image(dataset_id, image_id, region_id)
+                if mask is None or roi_image is None:
+                    continue
+                summary["regions"] += 1
+                S = int(patch_size or _effective_patch_size(roi_image))
+                seed = int(uuid.uuid5(uuid.NAMESPACE_URL, region_id).int % (2**32))
+
+                for cid in ac.TRAINABLE_CLASS_IDS:
+                    m = mask == cid
+                    if not m.any():
+                        continue
+                    patches, reason = qz.quantize_region(
+                        m, roi_image, cid, S=S, tau=tau, overlap=overlap,
+                        N=cap_n, seed=seed + cid,
+                    )
+                    if reason not in ("ok", "thin_region"):
+                        summary["skipped_reasons"][reason] = \
+                            summary["skipped_reasons"].get(reason, 0) + 1
+                    label_name = by_id[cid].name if cid in by_id else str(cid)
+                    for k, p in enumerate(patches):
+                        records.append({
+                            "image": p.image,
+                            "label_name": label_name,
+                            "stem": f"{image_id}_{region_id}_{cid}_{k:03d}",
+                            "label": cid,
+                            "weight": round(p.weight, 3),
+                            "source_image": image_id,
+                            "region": region_id,
+                            "x": p.x, "y": p.y,
+                            "inside": round(p.inside, 3),
+                            "upsampled": int(p.upsampled),
+                            "source_size": p.source_size,
+                        })
+
+    result = de.write_imagefolder(edir, records, classes_json)
+    result["export_id"] = export_id
+    result["num_regions"] = summary["regions"]
+    result["skipped_reasons"] = summary["skipped_reasons"]
+    return result
+
+
+def list_exports_patch(dataset_id: str) -> list[str]:
+    root = dataset_dir(dataset_id) / "exports" / "active_learning_patch"
+    if not root.exists():
+        return []
+    return sorted(p.name for p in root.iterdir() if p.is_dir())
+
+
 def list_exports(dataset_id: str) -> list[str]:
     root = exports_root(dataset_id)
     if not root.exists():
