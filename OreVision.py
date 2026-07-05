@@ -91,9 +91,11 @@ with st.sidebar:
     st.divider()
     st.subheader("Модель")
     st.write(f"Режим: **{config.ML_MODE.upper()}**")
+    import os as _os  # noqa: PLC0415
+    from ml_service.model import DEFAULT_CKPT as _default_ckpt  # noqa: PLC0415
     st.caption(
-        "Классификатор сортов руды ВШИТ в приложение "
-        "(grade_unfreeze_best.pth) и считает локально. "
+        f"Классификатор сортов руды ВШИТ в приложение "
+        f"(`{_os.path.basename(_default_ckpt)}`) и считает локально. "
         "`OREVISION_ML_MODE=real` — вынести инференс в отдельный сервис "
         "ml_service/ на :8001 (напр. на GPU-машину)."
     )

@@ -119,7 +119,8 @@ def health_check(mode: Optional[str] = None) -> tuple[bool, str]:
         return False, f"Не найден файл весов модели: {M.DEFAULT_CKPT}"
 
     loaded = M.load_model.cache_info().currsize > 0
+    ckpt_name = os.path.basename(M.DEFAULT_CKPT)
     return True, (
-        "Встроенная модель готова (grade_unfreeze_best.pth)"
+        f"Встроенная модель готова ({ckpt_name})"
         + (" — загружена в память." if loaded else ", загрузится при первом анализе.")
     )
