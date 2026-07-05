@@ -119,7 +119,7 @@
 ```bash
 pip install -r requirements.txt     # включает torch-стек встроенной модели
 streamlit run OreVision.py          # http://localhost:8501 (режим local)
-pytest -q                           # 91 тест
+pytest -q                           # 106 тестов
 ```
 Вынести инференс на отдельную (GPU) машину: `python ml_service/server.py` +
 `OREVISION_ML_MODE=real`.
